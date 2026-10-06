@@ -799,7 +799,21 @@ bool ShouldCalculateFolder(const std::wstring& path) {
     return true;
 }
 
-std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
+// Reads whether an item is a folder from the data Explorer keeps in its pidl,
+// without touching the disk or the network.
+std::optional<bool> IsFolderFromPidl(IShellFolder* shellFolder,
+                                     PCUITEMID_CHILD pidl) {
+    WIN32_FIND_DATAW findData;
+    if (FAILED(SHGetDataFromIDListW(shellFolder, pidl, SHGDFIL_FINDDATA,
+                                    &findData, sizeof(findData)))) {
+        return std::nullopt;
+    }
+    return (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path,
+                                          IShellFolder* shellFolder,
+                                          PCUITEMID_CHILD pidl) {
     auto cached = LookupCache(path);
     if (cached && cached->fresh) {
         return cached->item;
@@ -817,8 +831,11 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
     // drive takes several round trips, so don't touch network drives at all
     // unless enabled. Network items are then never cached, so checking after
     // the cache lookup lets cached local items skip the drive type check.
+    // The item is shown empty, but is still marked as a file or folder (read
+    // from the pidl, without I/O), so sorting keeps folders together.
     if (!g_settings.networkDrives && IsNetworkPath(path)) {
-        return ItemSize{};  // Shown empty.
+        return ItemSize{std::nullopt,
+                        IsFolderFromPidl(shellFolder, pidl).value_or(false)};
     }
 
     // Reads the attributes and reparse tag without following links, and gives
@@ -826,12 +843,11 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
     auto raw = ReadAllocation(path);
     if (!raw) {
         // Still tell files and folders apart, so sorting keeps them grouped.
-        DWORD attributes = GetFileAttributesW(ToExtendedPath(path).c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
+        auto isFolder = IsFolderFromPidl(shellFolder, pidl);
+        if (!isFolder) {
             return std::nullopt;
         }
-        return ItemSize{std::nullopt,
-                        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0};
+        return ItemSize{std::nullopt, *isFolder};
     }
 
     ItemSize item;
@@ -868,14 +884,8 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
     return item;
 }
 
-std::optional<std::wstring> GetItemPath(void* pFolder, PCUITEMID_CHILD pidl) {
-    Microsoft::WRL::ComPtr<IShellFolder> shellFolder;
-    HRESULT hr = static_cast<IUnknown*>(pFolder)->QueryInterface(
-        IID_PPV_ARGS(&shellFolder));
-    if (FAILED(hr) || !shellFolder) {
-        return std::nullopt;
-    }
-
+std::optional<std::wstring> GetItemPath(IShellFolder* shellFolder,
+                                        PCUITEMID_CHILD pidl) {
     STRRET strret;
     if (FAILED(shellFolder->GetDisplayNameOf(pidl, SHGDN_FORPARSING,
                                              &strret))) {
@@ -903,11 +913,18 @@ std::optional<std::wstring> GetItemPath(void* pFolder, PCUITEMID_CHILD pidl) {
 }
 
 std::optional<ItemSize> GetItemSizeOnDisk(void* pFolder, PCUITEMID_CHILD pidl) {
-    auto path = GetItemPath(pFolder, pidl);
+    Microsoft::WRL::ComPtr<IShellFolder> shellFolder;
+    HRESULT hr = static_cast<IUnknown*>(pFolder)->QueryInterface(
+        IID_PPV_ARGS(&shellFolder));
+    if (FAILED(hr) || !shellFolder) {
+        return std::nullopt;
+    }
+
+    auto path = GetItemPath(shellFolder.Get(), pidl);
     if (!path) {
         return std::nullopt;
     }
-    return GetItemSizeOnDisk(*path);
+    return GetItemSizeOnDisk(*path, shellFolder.Get(), pidl);
 }
 
 HRESULT SetStrRet(STRRET* strret, PCWSTR text) {

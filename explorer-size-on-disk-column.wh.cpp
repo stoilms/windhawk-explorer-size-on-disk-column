@@ -21,16 +21,24 @@
 /*
 # Size on disk column in Explorer details
 
-Adds a **Size on disk** column to File Explorer's details view. The value
-matches the "Size on disk" figure in a file or folder's Properties dialog as
+Adds a **Size on disk** column to File Explorer's details view. The value 
+matches the "Size on disk" figure in a file or folder's Properties dialog as 
 closely as possible.
+
+![Size on disk column showing sizes for files and folders](https://raw.githubusercontent.com/stoilms/windhawk-explorer-size-on-disk-column/main/images/screenshot2.png)
 
 ## How to use
 
 1. Enable the mod and restart Explorer (or sign out and back in).
 2. Open a folder in **Details** view.
-3. Right-click any column header and tick **Size on disk**. If it isn't in the
-   short list, click **More...** and find it there.
+3. Right-click any column header and tick **Size on disk**. 
+If it isn't in the short list, click **More...** and find it there.
+
+![Size on disk in the column header menu](https://raw.githubusercontent.com/stoilms/windhawk-explorer-size-on-disk-column/main/images/screenshot1.png)
+
+The values match the Properties dialog:
+
+![Properties dialog showing the same size on disk](https://raw.githubusercontent.com/stoilms/windhawk-explorer-size-on-disk-column/main/images/screenshot3.png)
 
 ## How the value is calculated
 

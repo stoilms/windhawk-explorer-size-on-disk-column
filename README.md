@@ -2,6 +2,8 @@
 
 A [Windhawk](https://windhawk.net/) mod that adds a **Size on disk** column to File Explorer's details view, for files and folders. The values match the "Size on disk" figure in each item's Properties dialog.
 
+![Size on disk column showing sizes for files and folders](images/screenshot2.png)
+
 ## Requirements
 
 - Windows 11 24H2 or later (x64)
@@ -16,6 +18,12 @@ To install it manually, open Windhawk, choose **Create a new mod**, replace the 
 ## Usage
 
 Open a folder in **Details** view, right-click any column header and tick **Size on disk**. If it isn't in the short list, click **More...** and find it there.
+
+![Size on disk in the column header menu](images/screenshot1.png)
+
+The values match the Properties dialog:
+
+![Properties dialog showing the same size on disk](images/screenshot3.png)
 
 With **Add to default folder layouts** enabled, the column is added to Explorer's built-in folder templates. Templates only apply to folders without saved view settings, so either reset saved views (Folder Options > View > **Reset Folders**) or set the column up in one folder and use Folder Options > View > **Apply to Folders**.
 

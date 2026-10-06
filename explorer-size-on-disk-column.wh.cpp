@@ -147,6 +147,7 @@ getter with a real size on disk calculation.
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <shtypes.h>
+#include <wrl/client.h>
 
 #ifndef IO_REPARSE_TAG_WOF
 #define IO_REPARSE_TAG_WOF 0x80000017L
@@ -204,33 +205,6 @@ auto HookRefCountScope() {
 bool FirstHits(std::atomic<int>& counter, int limit = 3) {
     return counter < limit && counter++ < limit;
 }
-
-// Minimal COM smart pointer, to avoid a C++/WinRT dependency.
-template <typename T>
-class ComPtr {
-   public:
-    ComPtr() = default;
-    ComPtr(const ComPtr&) = delete;
-    ComPtr& operator=(const ComPtr&) = delete;
-    ~ComPtr() { Reset(); }
-    void Reset() {
-        if (m_ptr) {
-            m_ptr->Release();
-            m_ptr = nullptr;
-        }
-    }
-    T* Get() const { return m_ptr; }
-    T** Put() {
-        Reset();
-        return &m_ptr;
-    }
-    void** PutVoid() { return reinterpret_cast<void**>(Put()); }
-    T* operator->() const { return m_ptr; }
-    explicit operator bool() const { return m_ptr != nullptr; }
-
-   private:
-    T* m_ptr = nullptr;
-};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Path helpers
@@ -810,9 +784,9 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
 }
 
 std::optional<std::wstring> GetItemPath(void* pFolder, PCUITEMID_CHILD pidl) {
-    ComPtr<IShellFolder> shellFolder;
+    Microsoft::WRL::ComPtr<IShellFolder> shellFolder;
     HRESULT hr = static_cast<IUnknown*>(pFolder)->QueryInterface(
-        IID_IShellFolder, shellFolder.PutVoid());
+        IID_PPV_ARGS(&shellFolder));
     if (FAILED(hr) || !shellFolder) {
         return std::nullopt;
     }

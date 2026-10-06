@@ -72,6 +72,7 @@ Each version is a separate commit, with test results in the commit message.
 | 0.4 | Fixed Explorer windows not opening (Home page layout) and OneDrive folder totals. |
 | 0.5 | Faster sizes, instant cached values, small-file fix and lower disk and OneDrive load. |
 | 0.6 | Fixes from the Windhawk review: private thread pool for folder walks, safe unloading, links and cloud folders handled consistently, network drives skipped entirely by default, default layouts limited to file folder types, an option to skip system folders, and a setting for how many subfolder sizes are remembered. |
+| 0.7 | Second Windhawk review: every folder walk runs in the background pool, folders stay together when sorting on skipped network drives, and new defaults (system folders skipped, one-hour refresh interval). |
 
 ## Credits
 

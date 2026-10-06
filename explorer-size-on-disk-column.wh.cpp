@@ -2,7 +2,7 @@
 // @id              explorer-size-on-disk-column
 // @name            Size on disk column in Explorer details
 // @description     Adds a "Size on disk" column to File Explorer's details view for files and folders
-// @version         0.6.0
+// @version         0.7.0
 // @author          stoilms
 // @github          https://github.com/stoilms
 // @license         GPL-3.0

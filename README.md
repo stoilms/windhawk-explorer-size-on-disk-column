@@ -31,12 +31,12 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 
 | Setting | Default | What it does |
 |---|---|---|
-| Show folder sizes | Enabled | Calculate folder sizes always, everywhere except system folders (Windows, Program Files and ProgramData, which hold hundreds of thousands of files), or never (files only). |
+| Show folder sizes | Enabled, except system folders | Calculate folder sizes always, everywhere except system folders (Windows, Program Files and ProgramData, which hold hundreds of thousands of files), or never (files only). |
 | Folder calculation method | Accurate | Accurate matches the Properties dialog. Fast reads directory listings, which is quicker but can be off for very small files and cloud files. |
 | Calculate sizes on network drives | Off | Network files and folders can be slow to query, and Explorer may stop responding while it waits. When off, the column stays empty on network drives. |
 | Mix files and folders when sorting | Off | By default, folders stay together when sorting by size on disk. |
 | Add to default folder layouts | On | Adds the column after Size in Explorer's folder templates. |
-| Folder refresh interval (seconds) | 120 | Cached values are shown straight away; older folder values are recalculated in the background. |
+| Folder refresh interval (seconds) | 3600 (one hour) | Cached values are shown straight away; older folder values are recalculated in the background. |
 | Remember subfolder sizes | All subfolders | Calculating a folder also finds every subfolder's size. Remembering all of them makes browsing deeper instant but uses more memory in Explorer (up to about 30 MB); with direct subfolders only, deeper folders are calculated again when opened. |
 
 ## How it works

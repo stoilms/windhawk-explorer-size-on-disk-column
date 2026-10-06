@@ -91,7 +91,7 @@ getter with a real size on disk calculation.
 
 // ==WindhawkModSettings==
 /*
-- folderSizes: always
+- folderSizes: exceptSystemFolders
   $name: Show folder sizes
   $description: >-
     Folder sizes are calculated by walking the whole folder tree, which can be
@@ -124,11 +124,12 @@ getter with a real size on disk calculation.
   $description: >-
     Adds the column after Size in Explorer's folder templates. Only affects
     folders without saved view settings - see the mod description.
-- refreshSeconds: 120
+- refreshSeconds: 3600
   $name: Folder refresh interval (seconds)
   $description: >-
     A folder's value is shown from the cache straight away. If it's older than
     this, it's also recalculated in the background and updated if it changed.
+    The default is one hour (3600 seconds).
 - subfolderCache: all
   $name: Remember subfolder sizes
   $description: >-
@@ -1587,9 +1588,9 @@ void HookRegistryFunctions() {
 
 void LoadSettings() {
     auto folderSizes = WindhawkUtils::StringSetting::make(L"folderSizes");
-    g_settings.folderSizes = FolderSizes::always;
-    if (wcscmp(folderSizes, L"exceptSystemFolders") == 0) {
-        g_settings.folderSizes = FolderSizes::exceptSystemFolders;
+    g_settings.folderSizes = FolderSizes::exceptSystemFolders;
+    if (wcscmp(folderSizes, L"always") == 0) {
+        g_settings.folderSizes = FolderSizes::always;
     } else if (wcscmp(folderSizes, L"disabled") == 0) {
         g_settings.folderSizes = FolderSizes::disabled;
     }

@@ -71,8 +71,10 @@ The values match the Properties dialog:
 ## Showing the column in every folder
 
 With **Add to default folder layouts** enabled, the column is added to
-Explorer's built-in templates for file folders (never to Home, which breaks
-if its layout is changed). Templates only apply to folders that
+Explorer's built-in templates for regular file folders (general items,
+documents, pictures, music, videos, downloads, the user folder and OneDrive).
+Other views, such as Home, Gallery, libraries and search results, are left
+alone. Templates only apply to folders that
 don't have saved view settings, so after enabling it either reset saved views
 (Folder Options > View > **Reset Folders**) or set the column up in one folder
 and use Folder Options > View > **Apply to Folders** for each folder type.
@@ -1224,14 +1226,39 @@ constexpr std::wstring_view kSizeOnDiskCanonicalName =
 // Room for ";" + the Size entry's prefix (flags and width) + our name.
 constexpr DWORD kColumnListExtraBytes = 96 * sizeof(WCHAR);
 
-bool ContainsCaseInsensitive(std::wstring_view haystack,
-                             std::wstring_view needle) {
+size_t FindCaseInsensitive(std::wstring_view haystack,
+                           std::wstring_view needle) {
     auto it = std::search(haystack.begin(), haystack.end(), needle.begin(),
                           needle.end(), [](wchar_t a, wchar_t b) {
                               return std::towlower(a) == std::towlower(b);
                           });
-    return it != haystack.end();
+    return it == haystack.end() ? std::wstring_view::npos
+                                : (size_t)(it - haystack.begin());
 }
+
+bool ContainsCaseInsensitive(std::wstring_view haystack,
+                             std::wstring_view needle) {
+    return FindCaseInsensitive(haystack, needle) != std::wstring_view::npos;
+}
+
+// Folder types whose layouts get the column: the ones used for regular file
+// system folders. Anything else, including special views such as Home and any
+// added by future Windows versions, is left alone.
+constexpr std::wstring_view kFileFolderTypes[] = {
+    L"{5c4f28b5-f869-4e84-8e60-f11db97c5cc7}"sv,  // Generic
+    L"{7d49d726-3c21-4f05-99aa-fdc2c9474656}"sv,  // Documents
+    L"{b3690e58-e961-423b-b687-386ebfd83239}"sv,  // Pictures
+    L"{94d6ddcc-4a68-4175-a374-bd584a510b78}"sv,  // Music
+    L"{5fa96407-7e77-483c-ac93-691d05850de8}"sv,  // Videos
+    L"{885a186e-a440-4ada-812b-db871b942259}"sv,  // Downloads
+    L"{cd0fc69b-71e2-46e5-9690-5bcd9f57aab3}"sv,  // UserFiles
+    L"{69f1e26b-ec64-4280-bc83-f1eb887ec35a}"sv,  // VersionControl
+    L"{4f01ebc5-2385-41f2-a28e-2c5c91fb56e0}"sv,  // StorageProviderGeneric
+    L"{dd61bd66-70e8-48dd-9655-65c5e1aac2d1}"sv,  // StorageProviderDocuments
+    L"{71d642a9-f2b1-42cd-ad92-eb9300c7cc0a}"sv,  // StorageProviderPictures
+    L"{672ecd7e-af04-4399-875c-0290845b6247}"sv,  // StorageProviderMusic
+    L"{51294da1-d7b1-485b-9e9a-17cffe33e187}"sv,  // StorageProviderVideos
+};
 
 std::wstring GetPathFromHKEY(HKEY key) {
     // Predefined keys (HKLM etc.) can't be queried; the caller only needs the
@@ -1275,14 +1302,33 @@ std::wstring GetPathFromHKEY(HKEY key) {
         nameLength / sizeof(WCHAR));
 }
 
+// True for ...\Explorer\FolderTypes\{type}\TopViews\{view} keys whose type is
+// in kFileFolderTypes.
 bool IsFolderTemplateKey(HKEY key, LPCWSTR subKey) {
     std::wstring path = GetPathFromHKEY(key);
     if (subKey && *subKey) {
         path += L'\\';
         path += subKey;
     }
-    return ContainsCaseInsensitive(path, L"\\Explorer\\FolderTypes\\"sv) &&
-           ContainsCaseInsensitive(path, L"\\TopViews\\"sv);
+
+    constexpr auto kFolderTypes = L"\\Explorer\\FolderTypes\\"sv;
+    size_t typeStart = FindCaseInsensitive(path, kFolderTypes);
+    if (typeStart == std::wstring::npos ||
+        !ContainsCaseInsensitive(path, L"\\TopViews\\"sv)) {
+        return false;
+    }
+    typeStart += kFolderTypes.size();
+    size_t typeEnd = path.find(L'\\', typeStart);
+    if (typeEnd == std::wstring::npos) {
+        return false;
+    }
+
+    std::wstring_view type(path.data() + typeStart, typeEnd - typeStart);
+    return std::any_of(std::begin(kFileFolderTypes),
+                       std::end(kFileFolderTypes), [type](auto allowed) {
+                           return type.size() == allowed.size() &&
+                                  ContainsCaseInsensitive(type, allowed);
+                       });
 }
 
 // "prop:0(34)System.ItemNameDisplay;0System.DateModified;0System.Size;..."

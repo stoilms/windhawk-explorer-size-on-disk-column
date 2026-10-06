@@ -50,7 +50,7 @@ Windows already defines a hidden `System.FileAllocationSize` property, but Explo
 
 - Libraries, search results, zip folders and the Recycle Bin don't show values, as they aren't regular file system folders.
 - Hard links are counted once per link, as the Properties dialog does.
-- The column is never added to the Home page or Gallery layouts.
+- The column is only added to the default layouts of regular file folders (general items, documents, pictures, music, videos, downloads, the user folder and OneDrive), never to Home, Gallery, libraries or search results.
 - A Windows update that renames the Explorer functions the mod hooks will stop the mod from loading until it's updated. Explorer itself keeps working.
 
 ## If Explorer windows stop opening

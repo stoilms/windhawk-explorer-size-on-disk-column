@@ -1469,18 +1469,16 @@ void HookRegistryFunctions() {
 // Mod lifecycle
 
 void LoadSettings() {
-    PCWSTR folderSizes = Wh_GetStringSetting(L"folderSizes");
+    auto folderSizes = WindhawkUtils::StringSetting::make(L"folderSizes");
     g_settings.folderSizes = FolderSizes::always;
     if (wcscmp(folderSizes, L"withShiftKey") == 0) {
         g_settings.folderSizes = FolderSizes::withShiftKey;
     } else if (wcscmp(folderSizes, L"disabled") == 0) {
         g_settings.folderSizes = FolderSizes::disabled;
     }
-    Wh_FreeStringSetting(folderSizes);
 
-    PCWSTR method = Wh_GetStringSetting(L"folderMethod");
+    auto method = WindhawkUtils::StringSetting::make(L"folderMethod");
     g_settings.accurateFolders = wcscmp(method, L"fast") != 0;
-    Wh_FreeStringSetting(method);
 
     g_settings.networkDrives = Wh_GetIntSetting(L"networkDrives");
     g_settings.mixFoldersWhenSorting =

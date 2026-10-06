@@ -48,7 +48,7 @@ Disabling the mod alone may not be enough: if Explorer is already stuck, it has 
 
 These rules come from problems found during development. The commit history explains each one in detail.
 
-- **Never do slow work on a thread that owns windows.** Explorer calls the column's getter on its window threads, and walking a folder tree there froze Explorer. Folder sizes are calculated on background threads and Explorer is told to redraw the item afterwards.
+- **Never do slow work on a thread that owns windows.** Explorer calls the column's getter on its window threads, and walking a folder tree there froze Explorer. Folder sizes are always calculated in the mod's own background thread pool, whichever Explorer thread asks, and Explorer is told to redraw the item afterwards.
 - **Only ask Explorer to redraw an item when its value changed.** Redrawing unchanged items made Explorer request them again, which caused a recalculation loop.
 - **Don't add the column to non-folder layouts.** Adding it to the Home page layout stopped Explorer windows from opening. The template change only applies to the folder types listed in `kFileFolderTypes` (an allowlist of regular file folder types), and only to layouts that include `System.ItemNameDisplay` and have no Home markers. Keep it that way: add a folder type only after checking that it's a regular file folder, and test Home after any change.
 - **Leave copy, move and delete operations alone.** The `CRecursiveFolderOperation` guards stop the mod from changing values Windows uses during file operations.

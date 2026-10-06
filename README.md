@@ -31,12 +31,12 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 
 | Setting | Default | What it does |
 |---|---|---|
-| Show folder sizes | Enabled | Calculate folder sizes always, everywhere except system folders (Windows, Program Files and ProgramData, which hold hundreds of thousands of files), or never (files only). |
+| Show folder sizes | Enabled, except system folders | Calculate folder sizes always, everywhere except system folders (Windows, Program Files and ProgramData, which hold hundreds of thousands of files), or never (files only). |
 | Folder calculation method | Accurate | Accurate matches the Properties dialog. Fast reads directory listings, which is quicker but can be off for very small files and cloud files. |
 | Calculate sizes on network drives | Off | Network files and folders can be slow to query, and Explorer may stop responding while it waits. When off, the column stays empty on network drives. |
 | Mix files and folders when sorting | Off | By default, folders stay together when sorting by size on disk. |
 | Add to default folder layouts | On | Adds the column after Size in Explorer's folder templates. |
-| Folder refresh interval (seconds) | 120 | Cached values are shown straight away; older folder values are recalculated in the background. |
+| Folder refresh interval (seconds) | 3600 (one hour) | Cached values are shown straight away; older folder values are recalculated in the background. |
 | Remember subfolder sizes | All subfolders | Calculating a folder also finds every subfolder's size. Remembering all of them makes browsing deeper instant but uses more memory in Explorer (up to about 30 MB); with direct subfolders only, deeper folders are calculated again when opened. |
 
 ## How it works
@@ -44,7 +44,7 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 Windows already defines a hidden `System.FileAllocationSize` property, but Explorer doesn't offer it as a column, and its own getter (`CFSFolder::_GetFileAllocationSize`) returns the logical size. The mod exposes the property as a column and replaces that getter with a real size on disk calculation:
 
 - **Files:** the allocation size rounded down to whole clusters, so tiny files stored inside the NTFS file table count as 0 bytes, as in Properties. Compressed, sparse and CompactOS files use their compressed size rounded up to whole clusters.
-- **Folders:** the sum of every file underneath, calculated in the background at low priority and never on Explorer's window threads. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
+- **Folders:** the sum of every file underneath, always calculated in the background at low priority, at most two folders at a time, never on the Explorer thread that asked. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
 - **Cache:** folder values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches its subfolders (all, or only the direct ones, depending on a setting). When the cache is full, old values make room and new subfolder values are skipped; values in use are never dropped. File values are only reused for a few seconds, so a changed file shows its new size after a refresh.
 
 ## Limitations
@@ -72,6 +72,7 @@ Each version is a separate commit, with test results in the commit message.
 | 0.4 | Fixed Explorer windows not opening (Home page layout) and OneDrive folder totals. |
 | 0.5 | Faster sizes, instant cached values, small-file fix and lower disk and OneDrive load. |
 | 0.6 | Fixes from the Windhawk review: private thread pool for folder walks, safe unloading, links and cloud folders handled consistently, network drives skipped entirely by default, default layouts limited to file folder types, an option to skip system folders, and a setting for how many subfolder sizes are remembered. |
+| 0.7 | Second Windhawk review: every folder walk runs in the background pool, folders stay together when sorting on skipped network drives, and new defaults (system folders skipped, one-hour refresh interval). |
 
 ## Credits
 

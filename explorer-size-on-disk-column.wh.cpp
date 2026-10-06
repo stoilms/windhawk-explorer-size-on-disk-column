@@ -1215,7 +1215,8 @@ bool HookWindowsStorageSymbols() {
         return false;
     }
 
-    WindhawkUtils::SYMBOL_HOOK hooks[] = {
+    // windows.storage.dll
+    WindhawkUtils::SYMBOL_HOOK windowsStorageHooks[] = {
         {
             {LR"(public: virtual long __cdecl CFSFolder::MapColumnToSCID(unsigned int,struct _tagpropertykey *))"},
             &CFSFolder_MapColumnToSCID_Original,
@@ -1264,7 +1265,8 @@ bool HookWindowsStorageSymbols() {
         },
     };
 
-    return WindhawkUtils::HookSymbols(module, hooks, ARRAYSIZE(hooks));
+    return WindhawkUtils::HookSymbols(module, windowsStorageHooks,
+                                      ARRAYSIZE(windowsStorageHooks));
 }
 
 ////////////////////////////////////////////////////////////////////////////////

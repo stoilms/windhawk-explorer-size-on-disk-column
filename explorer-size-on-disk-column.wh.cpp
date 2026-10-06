@@ -1456,12 +1456,12 @@ void HookRegistryFunctions() {
 
     if (auto p = (RegQueryValueExW_t)GetProcAddress(kernelBase,
                                                     "RegQueryValueExW")) {
-        WindhawkUtils::Wh_SetFunctionHookT(p, RegQueryValueExW_Hook,
-                                           &RegQueryValueExW_Original);
+        WindhawkUtils::SetFunctionHook(p, RegQueryValueExW_Hook,
+                                       &RegQueryValueExW_Original);
     }
     if (auto p = (RegGetValueW_t)GetProcAddress(kernelBase, "RegGetValueW")) {
-        WindhawkUtils::Wh_SetFunctionHookT(p, RegGetValueW_Hook,
-                                           &RegGetValueW_Original);
+        WindhawkUtils::SetFunctionHook(p, RegGetValueW_Hook,
+                                       &RegGetValueW_Original);
     }
 }
 
@@ -1515,12 +1515,11 @@ BOOL Wh_ModInit() {
     }
     ULONGLONG symbolsMs = GetTickCount64() - initStart;
 
-    WindhawkUtils::Wh_SetFunctionHookT(PSFormatForDisplayAlloc,
-                                       PSFormatForDisplayAlloc_Hook,
-                                       &PSFormatForDisplayAlloc_Original);
-    WindhawkUtils::Wh_SetFunctionHookT(PSFormatForDisplay,
-                                       PSFormatForDisplay_Hook,
-                                       &PSFormatForDisplay_Original);
+    WindhawkUtils::SetFunctionHook(PSFormatForDisplayAlloc,
+                                   PSFormatForDisplayAlloc_Hook,
+                                   &PSFormatForDisplayAlloc_Original);
+    WindhawkUtils::SetFunctionHook(PSFormatForDisplay, PSFormatForDisplay_Hook,
+                                   &PSFormatForDisplay_Original);
 
     if (g_settings.addToDefaultColumns) {
         HookRegistryFunctions();

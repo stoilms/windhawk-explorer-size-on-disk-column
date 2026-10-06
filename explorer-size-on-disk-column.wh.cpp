@@ -848,8 +848,9 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
     } else if (IsOnlineOnlyFolder(raw->attributes)) {
         item.size = 0;  // Not listed, so OneDrive isn't asked for anything.
     } else if (IsGUIThread(FALSE)) {
-        // Never walk a folder tree on a thread that owns windows, as that can
-        // freeze Explorer. Calculate in the background and show it when done.
+        // Never walk a folder tree on a GUI thread (one that has used USER or
+        // GDI, such as a window thread), as that can freeze Explorer.
+        // Calculate in the background and show it when done.
         StartFolderJob(path, false);
         return item;
     } else {
@@ -1662,7 +1663,7 @@ BOOL Wh_ModInit() {
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
 
-    // Stops folder walks at the next directory.
+    // Stops folder walks at the next file or folder they reach.
     g_stopping = true;
 }
 

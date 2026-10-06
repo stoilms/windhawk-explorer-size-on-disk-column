@@ -589,7 +589,6 @@ std::unordered_map<std::wstring, CacheEntry> g_cache;
 
 // Background folder calculations.
 std::atomic<bool> g_stopping;
-std::atomic<int> g_pendingJobs;
 std::mutex g_pendingMutex;
 std::unordered_set<std::wstring> g_pendingPaths;
 
@@ -639,6 +638,7 @@ void StoreSubfolderTotals(
 // tying up threads in Explorer's own pool.
 constexpr DWORD kMaxConcurrentWalks = 2;
 PTP_POOL g_walkPool;
+PTP_CLEANUP_GROUP g_walkCleanupGroup;
 TP_CALLBACK_ENVIRON g_walkEnvironment;
 
 struct FolderJobParams {
@@ -689,7 +689,6 @@ void CALLBACK FolderJob(PTP_CALLBACK_INSTANCE, void* parameter) {
         std::lock_guard lock(g_pendingMutex);
         g_pendingPaths.erase(*path);
     }
-    g_pendingJobs--;
 }
 
 void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
@@ -704,14 +703,12 @@ void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
         }
     }
 
-    g_pendingJobs++;
     auto* parameter = new FolderJobParams{path, explorerHasValue};
     if (!TrySubmitThreadpoolCallback(FolderJob, parameter,
                                      &g_walkEnvironment)) {
         delete parameter;
         std::lock_guard lock(g_pendingMutex);
         g_pendingPaths.erase(path);
-        g_pendingJobs--;
     }
 }
 
@@ -1498,10 +1495,22 @@ BOOL Wh_ModInit() {
     // If the pool can't be created, folders requested on window threads just
     // stay empty.
     g_walkPool = CreateThreadpool(nullptr);
-    if (g_walkPool) {
+    g_walkCleanupGroup = CreateThreadpoolCleanupGroup();
+    if (g_walkPool && g_walkCleanupGroup) {
         SetThreadpoolThreadMaximum(g_walkPool, kMaxConcurrentWalks);
         InitializeThreadpoolEnvironment(&g_walkEnvironment);
         SetThreadpoolCallbackPool(&g_walkEnvironment, g_walkPool);
+        SetThreadpoolCallbackCleanupGroup(&g_walkEnvironment,
+                                          g_walkCleanupGroup, nullptr);
+    } else {
+        if (g_walkCleanupGroup) {
+            CloseThreadpoolCleanupGroup(g_walkCleanupGroup);
+            g_walkCleanupGroup = nullptr;
+        }
+        if (g_walkPool) {
+            CloseThreadpool(g_walkPool);
+            g_walkPool = nullptr;
+        }
     }
 
     Wh_Log(L"Init took %I64u ms (symbols %I64u ms), fast file queries: %s",
@@ -1522,11 +1531,19 @@ void Wh_ModUninit() {
     Wh_Log(L">");
 
     g_stopping = true;
-    while (g_hookRefCount > 0 || g_pendingJobs > 0) {
+    // Walks are only queued from hooks, so none can be added after this.
+    while (g_hookRefCount > 0) {
         Sleep(100);
     }
 
     if (g_walkPool) {
+        // Returns only after every walk callback has returned, so no mod code
+        // is still running on a pool thread once the mod is unloaded. Queued
+        // walks that haven't started yet see g_stopping and return at once.
+        CloseThreadpoolCleanupGroupMembers(g_walkCleanupGroup, FALSE,
+                                           nullptr);
+        CloseThreadpoolCleanupGroup(g_walkCleanupGroup);
+        g_walkCleanupGroup = nullptr;
         DestroyThreadpoolEnvironment(&g_walkEnvironment);
         CloseThreadpool(g_walkPool);
         g_walkPool = nullptr;

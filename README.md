@@ -33,7 +33,7 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 |---|---|---|
 | Show folder sizes | Enabled | Calculate folder sizes always, only while Shift is held, or never (files only). |
 | Folder calculation method | Accurate | Accurate matches the Properties dialog. Fast reads directory listings, which is quicker but can be off for very small files and cloud files. |
-| Calculate folder sizes on network drives | Off | Network folders can be slow to walk. |
+| Calculate sizes on network drives | Off | Network files and folders can be slow to query, and Explorer may stop responding while it waits. When off, the column stays empty on network drives. |
 | Mix files and folders when sorting | Off | By default, folders stay together when sorting by size on disk. |
 | Add to default folder layouts | On | Adds the column after Size in Explorer's folder templates. |
 | Diagnostics | Off | Logs which code paths Explorer uses. Only needed when troubleshooting. |

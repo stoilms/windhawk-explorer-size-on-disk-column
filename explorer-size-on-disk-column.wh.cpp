@@ -61,7 +61,9 @@ The values match the Properties dialog:
   Cached values are shown immediately and refreshed in the background.
 * Cloud folders whose contents aren't on this PC yet are counted as 0 bytes
   without being listed, so OneDrive isn't asked to fetch anything.
-* Network folders are skipped by default.
+* Network drives are skipped by default and the column stays empty there,
+  because querying them can make Explorer stop responding on slow
+  connections. Turn on **Calculate sizes on network drives** to include them.
 * Only regular file-system folders are supported. Libraries, search results,
   zip folders and the Recycle Bin are not.
 * Hard links are counted once per link, as the Properties dialog does.
@@ -105,8 +107,12 @@ getter with a real size on disk calculation.
   $options:
   - accurate: Accurate (matches Properties)
   - fast: Fast (directory listings)
-- networkFolders: false
-  $name: Calculate folder sizes on network drives
+- networkDrives: false
+  $name: Calculate sizes on network drives
+  $description: >-
+    Files and folders on network drives can be slow to query, and Explorer
+    may stop responding while it waits, for example when sorting by this
+    column. When off, the column stays empty on network drives.
 - mixFoldersWhenSorting: false
   $name: Mix files and folders when sorting by size on disk
 - addToDefaultColumns: true
@@ -170,7 +176,7 @@ enum class FolderSizes { always, withShiftKey, disabled };
 struct {
     FolderSizes folderSizes;
     bool accurateFolders;
-    bool networkFolders;
+    bool networkDrives;
     bool mixFoldersWhenSorting;
     bool addToDefaultColumns;
     bool diagnostics;
@@ -739,7 +745,7 @@ void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
     }
 }
 
-bool ShouldCalculateFolder(const std::wstring& path) {
+bool ShouldCalculateFolder() {
     switch (g_settings.folderSizes) {
         case FolderSizes::disabled:
             return false;
@@ -752,7 +758,7 @@ bool ShouldCalculateFolder(const std::wstring& path) {
             break;
     }
 
-    return g_settings.networkFolders || !IsNetworkPath(path);
+    return true;
 }
 
 std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
@@ -763,10 +769,18 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
 
     if (cached && cached->item.isFolder) {
         // Show the old value now and refresh it in the background.
-        if (ShouldCalculateFolder(path)) {
+        if (ShouldCalculateFolder()) {
             StartFolderJob(path, cached->item.size.has_value());
         }
         return cached->item;
+    }
+
+    // Explorer also asks on its window threads, and each query on a network
+    // drive takes several round trips, so don't touch network drives at all
+    // unless enabled. Network items are then never cached, so checking after
+    // the cache lookup lets cached local items skip the drive type check.
+    if (!g_settings.networkDrives && IsNetworkPath(path)) {
+        return ItemSize{};  // Shown empty.
     }
 
     // Reads the attributes and reparse tag without following links, and gives
@@ -791,7 +805,7 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
                                  raw->allocationSize, GetClusterSize(path));
     } else if (IsFolderLink(raw->attributes, raw->reparseTag)) {
         return item;  // Shown empty, as links aren't followed.
-    } else if (!ShouldCalculateFolder(path)) {
+    } else if (!ShouldCalculateFolder()) {
         return item;  // Not calculated, and not cached either.
     } else if (IsOnlineOnlyFolder(raw->attributes)) {
         item.size = 0;  // Not listed, so OneDrive isn't asked for anything.
@@ -1488,7 +1502,7 @@ void LoadSettings() {
     g_settings.accurateFolders = wcscmp(method, L"fast") != 0;
     Wh_FreeStringSetting(method);
 
-    g_settings.networkFolders = Wh_GetIntSetting(L"networkFolders");
+    g_settings.networkDrives = Wh_GetIntSetting(L"networkDrives");
     g_settings.mixFoldersWhenSorting =
         Wh_GetIntSetting(L"mixFoldersWhenSorting");
     g_settings.addToDefaultColumns = Wh_GetIntSetting(L"addToDefaultColumns");

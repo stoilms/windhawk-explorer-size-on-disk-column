@@ -23,7 +23,7 @@ You need Windows 11 24H2 or later (x64) and [Windhawk](https://windhawk.net/).
 1. If the catalogue version of the mod is installed, disable it while you develop. Two copies would hook the same Explorer functions.
 2. In Windhawk, choose **Create a new mod** and replace the template with the contents of `explorer-size-on-disk-column.wh.cpp`. Windhawk saves it as a local mod with the ID `local@explorer-size-on-disk-column`.
 3. Click **Compile** to build and load it into Explorer.
-4. To see the mod's log, enable logging in the mod's **Advanced** tab and open Windhawk's log viewer (or a tool such as DebugView). Turn on the mod's **Diagnostics** setting for extra detail, such as which code paths Explorer uses and the column layouts being changed.
+4. To see the mod's log, enable logging in the mod's **Advanced** tab and open Windhawk's log viewer (or a tool such as DebugView). Lines marked `[diag]` show the first few times each code path is used and the column layouts being changed.
 
 ## If Explorer breaks while testing
 
@@ -135,7 +135,7 @@ When opening an issue, include:
 - your Windows version and build (run `winver`)
 - the mod version
 - the steps that cause the problem
-- the mod's log with **Diagnostics** turned on, covering the moment the problem happens
+- the mod's log (enable logging in the mod's **Advanced** tab), covering the moment the problem happens
 
 ## Licence
 

@@ -36,7 +36,6 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 | Calculate sizes on network drives | Off | Network files and folders can be slow to query, and Explorer may stop responding while it waits. When off, the column stays empty on network drives. |
 | Mix files and folders when sorting | Off | By default, folders stay together when sorting by size on disk. |
 | Add to default folder layouts | On | Adds the column after Size in Explorer's folder templates. |
-| Diagnostics | Off | Logs which code paths Explorer uses. Only needed when troubleshooting. |
 | Folder refresh interval (seconds) | 120 | Cached values are shown straight away; older folder values are recalculated in the background. |
 
 ## How it works

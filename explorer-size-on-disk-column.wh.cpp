@@ -120,11 +120,6 @@ getter with a real size on disk calculation.
   $description: >-
     Adds the column after Size in Explorer's folder templates. Only affects
     folders without saved view settings - see the mod description.
-- diagnostics: false
-  $name: Diagnostics
-  $description: >-
-    Logs which code paths Explorer uses for the column. Only needed when
-    troubleshooting.
 - refreshSeconds: 120
   $name: Folder refresh interval (seconds)
   $description: >-
@@ -179,7 +174,6 @@ struct {
     bool networkDrives;
     bool mixFoldersWhenSorting;
     bool addToDefaultColumns;
-    bool diagnostics;
     ULONGLONG cacheMs;
 } g_settings;
 
@@ -205,10 +199,10 @@ auto HookRefCountScope() {
         &g_hookRefCount, [](auto refCount) { (*refCount)--; }};
 }
 
-// Logs the first few times a code path is reached, to show which hooks
-// Explorer actually uses.
+// Logs only the first few times a code path is reached, so the log shows which
+// hooks Explorer actually uses without being flooded by every call.
 bool FirstHits(std::atomic<int>& counter, int limit = 3) {
-    return g_settings.diagnostics && counter++ < limit;
+    return counter < limit && counter++ < limit;
 }
 
 // Minimal COM smart pointer, to avoid a C++/WinRT dependency.
@@ -425,20 +419,6 @@ std::optional<RawAllocation> ReadAllocationByName(const std::wstring& path) {
 
 std::optional<RawAllocation> ReadAllocation(const std::wstring& path) {
     auto byName = ReadAllocationByName(path);
-
-    // Diagnostics: check the faster by-name method against the handle method
-    // for the first few files.
-    static std::atomic<int> checks;
-    if (FirstHits(checks, 25)) {
-        auto byHandle = ReadAllocationByHandle(path);
-        Wh_Log(L"[diag] check %s: byName=%I64d byHandle=%I64d attr=%08X "
-               L"tag=%08X",
-               path.c_str(), byName ? (LONGLONG)byName->allocationSize : -1,
-               byHandle ? (LONGLONG)byHandle->allocationSize : -1,
-               byHandle ? byHandle->attributes : 0,
-               byHandle ? byHandle->reparseTag : 0);
-    }
-
     return byName ? byName : ReadAllocationByHandle(path);
 }
 
@@ -1506,7 +1486,6 @@ void LoadSettings() {
     g_settings.mixFoldersWhenSorting =
         Wh_GetIntSetting(L"mixFoldersWhenSorting");
     g_settings.addToDefaultColumns = Wh_GetIntSetting(L"addToDefaultColumns");
-    g_settings.diagnostics = Wh_GetIntSetting(L"diagnostics");
 
     int refreshSeconds = Wh_GetIntSetting(L"refreshSeconds");
     if (refreshSeconds < 0) {

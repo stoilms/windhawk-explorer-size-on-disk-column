@@ -94,11 +94,12 @@ getter with a real size on disk calculation.
   $name: Show folder sizes
   $description: >-
     Folder sizes are calculated by walking the whole folder tree, which can be
-    slow for large folders. With the Shift option, folder sizes are only
-    calculated if Shift is held when the list is loaded or refreshed.
+    slow for large folders. Excluding system folders skips the Windows,
+    Program Files and ProgramData folders and everything in them, which hold
+    hundreds of thousands of files; they show no value.
   $options:
   - always: Enabled, calculated manually (can be slow)
-  - withShiftKey: Enabled, calculated manually while holding the Shift key
+  - exceptSystemFolders: Enabled, except system folders
   - disabled: Disabled (files only)
 - folderMethod: accurate
   $name: Folder calculation method
@@ -165,7 +166,7 @@ using namespace std::string_view_literals;
 ////////////////////////////////////////////////////////////////////////////////
 // Settings and shared state
 
-enum class FolderSizes { always, withShiftKey, disabled };
+enum class FolderSizes { always, exceptSystemFolders, disabled };
 
 struct {
     FolderSizes folderSizes;
@@ -703,15 +704,52 @@ void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
     }
 }
 
-bool ShouldCalculateFolder() {
+// Windows, Program Files, Program Files (x86) and ProgramData, read once at
+// start-up from the environment, without trailing backslashes.
+std::vector<std::wstring> g_systemFolders;
+
+void LoadSystemFolders() {
+    g_systemFolders.clear();
+
+    WCHAR buffer[MAX_PATH];
+    UINT length = GetWindowsDirectoryW(buffer, ARRAYSIZE(buffer));
+    if (length && length < ARRAYSIZE(buffer)) {
+        g_systemFolders.emplace_back(buffer, length);
+    }
+
+    for (PCWSTR name : {L"ProgramFiles", L"ProgramFiles(x86)", L"ProgramData"}) {
+        DWORD envLength =
+            GetEnvironmentVariableW(name, buffer, ARRAYSIZE(buffer));
+        if (envLength && envLength < ARRAYSIZE(buffer)) {
+            g_systemFolders.emplace_back(buffer, envLength);
+        }
+    }
+
+    for (auto& folder : g_systemFolders) {
+        while (!folder.empty() && folder.back() == L'\\') {
+            folder.pop_back();
+        }
+    }
+}
+
+// True for a system folder itself or any folder inside one.
+bool IsInSystemFolder(const std::wstring& path) {
+    for (const auto& folder : g_systemFolders) {
+        if (path.size() >= folder.size() &&
+            _wcsnicmp(path.c_str(), folder.c_str(), folder.size()) == 0 &&
+            (path.size() == folder.size() || path[folder.size()] == L'\\')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShouldCalculateFolder(const std::wstring& path) {
     switch (g_settings.folderSizes) {
         case FolderSizes::disabled:
             return false;
-        case FolderSizes::withShiftKey:
-            if (GetAsyncKeyState(VK_SHIFT) >= 0) {
-                return false;
-            }
-            break;
+        case FolderSizes::exceptSystemFolders:
+            return !IsInSystemFolder(path);
         case FolderSizes::always:
             break;
     }
@@ -727,7 +765,7 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
 
     if (cached && cached->item.isFolder) {
         // Show the old value now and refresh it in the background.
-        if (ShouldCalculateFolder()) {
+        if (ShouldCalculateFolder(path)) {
             StartFolderJob(path, cached->item.size.has_value());
         }
         return cached->item;
@@ -763,7 +801,7 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
                                  raw->allocationSize, GetClusterSize(path));
     } else if (IsFolderLink(raw->attributes, raw->reparseTag)) {
         return item;  // Shown empty, as links aren't followed.
-    } else if (!ShouldCalculateFolder()) {
+    } else if (!ShouldCalculateFolder(path)) {
         return item;  // Not calculated, and not cached either.
     } else if (IsOnlineOnlyFolder(raw->attributes)) {
         item.size = 0;  // Not listed, so OneDrive isn't asked for anything.
@@ -1493,8 +1531,8 @@ void HookRegistryFunctions() {
 void LoadSettings() {
     auto folderSizes = WindhawkUtils::StringSetting::make(L"folderSizes");
     g_settings.folderSizes = FolderSizes::always;
-    if (wcscmp(folderSizes, L"withShiftKey") == 0) {
-        g_settings.folderSizes = FolderSizes::withShiftKey;
+    if (wcscmp(folderSizes, L"exceptSystemFolders") == 0) {
+        g_settings.folderSizes = FolderSizes::exceptSystemFolders;
     } else if (wcscmp(folderSizes, L"disabled") == 0) {
         g_settings.folderSizes = FolderSizes::disabled;
     }
@@ -1519,6 +1557,7 @@ BOOL Wh_ModInit() {
     ULONGLONG initStart = GetTickCount64();
 
     LoadSettings();
+    LoadSystemFolders();
 
     for (PCWSTR moduleName : {L"kernelbase.dll", L"kernel32.dll"}) {
         HMODULE module = GetModuleHandleW(moduleName);

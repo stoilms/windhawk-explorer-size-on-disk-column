@@ -146,7 +146,6 @@ getter with a real size on disk calculation.
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
-#include <shtypes.h>
 #include <wrl/client.h>
 
 #ifndef IO_REPARSE_TAG_WOF
@@ -157,9 +156,6 @@ getter with a real size on disk calculation.
 #endif
 #ifndef FILE_ATTRIBUTE_RECALL_ON_OPEN
 #define FILE_ATTRIBUTE_RECALL_ON_OPEN 0x00040000
-#endif
-#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
 #endif
 
 using namespace std::string_view_literals;
@@ -292,8 +288,7 @@ ULONGLONG RoundUp(ULONGLONG value, ULONGLONG granularity) {
 //   what's really on disk.
 // * Everything else: the allocation rounded down to whole clusters. Real
 //   allocations are always whole clusters; anything smaller is a tiny file
-//   stored inside the file table itself, which Properties counts as 0 bytes
-//   (this was the .url file showing 240 bytes).
+//   stored inside the file table itself, which Properties counts as 0 bytes.
 ULONGLONG AdjustAllocationSize(const std::wstring& path,
                                DWORD attributes,
                                DWORD reparseTag,
@@ -1082,7 +1077,7 @@ HRESULT WINAPI CRecursiveFolderOperation_Do_Hook(void* pThis) {
 }
 
 // Explorer's own getter for System.FileAllocationSize, which only returns the
-// logical size. Found via the v0.2 diagnostics.
+// logical size.
 using CFSFolder__GetFileAllocationSize_t =
     HRESULT(WINAPI*)(void* pFolder,
                      PCUITEMID_CHILD pidl,
@@ -1306,7 +1301,7 @@ std::optional<std::wstring> InjectSizeOnDiskColumn(std::wstring_view value) {
     }
 
     // Leave the Home page's layout alone. Adding a column to it stopped
-    // Explorer windows from opening at all (v0.2 and v0.3).
+    // Explorer windows from opening at all.
     for (auto marker : {L"System.Home."sv, L"System.ActivityInfo"sv,
                         L"System.WebAccountID"sv}) {
         if (ContainsCaseInsensitive(value, marker)) {

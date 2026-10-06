@@ -54,9 +54,9 @@ The values match the Properties dialog:
 
 ## Notes
 
-* Folder calculation can be slow for large trees, so it never runs on
-  Explorer's window threads. A folder's value appears as soon as its
-  calculation finishes in the background, at low priority. Calculating a
+* Folder calculation can be slow for large trees, so it always runs in the
+  background, at low priority and at most two folders at a time. A folder's
+  value appears as soon as its calculation finishes. Calculating a
   folder also caches its subfolders (all of them, or only the direct ones -
   see **Remember subfolder sizes**), so browsing into them is instant.
   Cached values are shown immediately and refreshed in the background.
@@ -863,18 +863,13 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path,
         return item;  // Not calculated, and not cached either.
     } else if (IsOnlineOnlyFolder(raw->attributes)) {
         item.size = 0;  // Not listed, so OneDrive isn't asked for anything.
-    } else if (IsGUIThread(FALSE)) {
-        // Never walk a folder tree on a GUI thread (one that has used USER or
-        // GDI, such as a window thread), as that can freeze Explorer.
-        // Calculate in the background and show it when done.
+    } else {
+        // Folder trees are always walked in the background pool, never on the
+        // thread that asked: on a GUI thread that could freeze Explorer, and
+        // the pool keeps every walk to the same limit and low priority. The
+        // value is shown when it's ready.
         StartFolderJob(path, false);
         return item;
-    } else {
-        std::vector<std::pair<std::wstring, ULONGLONG>> subfolderTotals;
-        item.size = GetFolderSizeOnDisk(path, &subfolderTotals);
-        if (item.size) {
-            StoreSubfolderTotals(subfolderTotals);
-        }
     }
 
     if (item.size) {
@@ -1649,8 +1644,7 @@ BOOL Wh_ModInit() {
         HookRegistryFunctions();
     }
 
-    // If the pool can't be created, folders requested on window threads just
-    // stay empty.
+    // If the pool can't be created, folder sizes just stay empty.
     g_walkPool = CreateThreadpool(nullptr);
     g_walkCleanupGroup = CreateThreadpoolCleanupGroup();
     if (g_walkPool && g_walkCleanupGroup) {

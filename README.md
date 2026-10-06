@@ -44,7 +44,7 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 Windows already defines a hidden `System.FileAllocationSize` property, but Explorer doesn't offer it as a column, and its own getter (`CFSFolder::_GetFileAllocationSize`) returns the logical size. The mod exposes the property as a column and replaces that getter with a real size on disk calculation:
 
 - **Files:** the allocation size rounded down to whole clusters, so tiny files stored inside the NTFS file table count as 0 bytes, as in Properties. Compressed, sparse and CompactOS files use their compressed size rounded up to whole clusters.
-- **Folders:** the sum of every file underneath, calculated in the background at low priority and never on Explorer's window threads. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
+- **Folders:** the sum of every file underneath, always calculated in the background at low priority, at most two folders at a time, never on the Explorer thread that asked. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
 - **Cache:** folder values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches its subfolders (all, or only the direct ones, depending on a setting). When the cache is full, old values make room and new subfolder values are skipped; values in use are never dropped. File values are only reused for a few seconds, so a changed file shows its new size after a refresh.
 
 ## Limitations

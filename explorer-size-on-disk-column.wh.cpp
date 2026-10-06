@@ -634,9 +634,12 @@ void StoreSubfolderTotals(
 }
 
 // At most this many folder walks run at once, at background I/O priority, so
-// they don't slow down Explorer itself.
-constexpr LONG kMaxConcurrentWalks = 2;
-HANDLE g_walkSemaphore;
+// they don't slow down Explorer itself. Walks run in a private thread pool
+// capped at this many threads, so queued walks wait in its queue instead of
+// tying up threads in Explorer's own pool.
+constexpr DWORD kMaxConcurrentWalks = 2;
+PTP_POOL g_walkPool;
+TP_CALLBACK_ENVIRON g_walkEnvironment;
 
 struct FolderJobParams {
     std::wstring path;
@@ -645,20 +648,12 @@ struct FolderJobParams {
     bool explorerHasValue;
 };
 
-DWORD WINAPI FolderJob(void* parameter) {
+void CALLBACK FolderJob(PTP_CALLBACK_INSTANCE, void* parameter) {
     std::unique_ptr<FolderJobParams> params(
         static_cast<FolderJobParams*>(parameter));
     const std::wstring* path = &params->path;
 
-    bool acquired = false;
-    while (!g_stopping && g_walkSemaphore) {
-        if (WaitForSingleObject(g_walkSemaphore, 200) == WAIT_OBJECT_0) {
-            acquired = true;
-            break;
-        }
-    }
-
-    if (acquired && !g_stopping) {
+    if (!g_stopping) {
         bool background =
             SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
         ULONGLONG start = GetTickCount64();
@@ -688,10 +683,6 @@ DWORD WINAPI FolderJob(void* parameter) {
                                nullptr);
             }
         }
-
-        ReleaseSemaphore(g_walkSemaphore, 1, nullptr);
-    } else if (acquired) {
-        ReleaseSemaphore(g_walkSemaphore, 1, nullptr);
     }
 
     {
@@ -699,10 +690,13 @@ DWORD WINAPI FolderJob(void* parameter) {
         g_pendingPaths.erase(*path);
     }
     g_pendingJobs--;
-    return 0;
 }
 
 void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
+    if (g_stopping || !g_walkPool) {
+        return;
+    }
+
     {
         std::lock_guard lock(g_pendingMutex);
         if (!g_pendingPaths.insert(path).second) {
@@ -712,7 +706,8 @@ void StartFolderJob(const std::wstring& path, bool explorerHasValue) {
 
     g_pendingJobs++;
     auto* parameter = new FolderJobParams{path, explorerHasValue};
-    if (!QueueUserWorkItem(FolderJob, parameter, WT_EXECUTELONGFUNCTION)) {
+    if (!TrySubmitThreadpoolCallback(FolderJob, parameter,
+                                     &g_walkEnvironment)) {
         delete parameter;
         std::lock_guard lock(g_pendingMutex);
         g_pendingPaths.erase(path);
@@ -1500,9 +1495,14 @@ BOOL Wh_ModInit() {
         HookRegistryFunctions();
     }
 
-    g_walkSemaphore =
-        CreateSemaphoreW(nullptr, kMaxConcurrentWalks, kMaxConcurrentWalks,
-                         nullptr);
+    // If the pool can't be created, folders requested on window threads just
+    // stay empty.
+    g_walkPool = CreateThreadpool(nullptr);
+    if (g_walkPool) {
+        SetThreadpoolThreadMaximum(g_walkPool, kMaxConcurrentWalks);
+        InitializeThreadpoolEnvironment(&g_walkEnvironment);
+        SetThreadpoolCallbackPool(&g_walkEnvironment, g_walkPool);
+    }
 
     Wh_Log(L"Init took %I64u ms (symbols %I64u ms), fast file queries: %s",
            GetTickCount64() - initStart, symbolsMs,
@@ -1526,9 +1526,10 @@ void Wh_ModUninit() {
         Sleep(100);
     }
 
-    if (g_walkSemaphore) {
-        CloseHandle(g_walkSemaphore);
-        g_walkSemaphore = nullptr;
+    if (g_walkPool) {
+        DestroyThreadpoolEnvironment(&g_walkEnvironment);
+        CloseThreadpool(g_walkPool);
+        g_walkPool = nullptr;
     }
 }
 

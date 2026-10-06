@@ -49,8 +49,8 @@ The values match the Properties dialog:
   never downloaded.
 * **Folders:** the sum of the size on disk of every file underneath,
   calculated manually by walking the folder tree. Junctions and symbolic links
-  inside the folder are not followed, but OneDrive and other cloud folders
-  are.
+  are not followed: they aren't counted inside a folder, and show no value
+  themselves. OneDrive and other cloud folders are walked.
 
 ## Notes
 
@@ -446,11 +446,35 @@ std::optional<ULONGLONG> GetFileSizeOnDisk(const std::wstring& path,
                                 raw->allocationSize, clusterSize);
 }
 
+// Junctions and directory symlinks are never followed.
+bool IsFolderLink(DWORD attributes, DWORD reparseTag) {
+    return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+           IsReparseTagNameSurrogate(reparseTag);
+}
+
+// Cloud folders whose contents aren't on this PC yet hold 0 bytes locally,
+// and listing them would make OneDrive fetch the listing from the internet.
+bool IsOnlineOnlyFolder(DWORD attributes) {
+    return attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN;
+}
+
 // Walks a folder tree. Returns the total, and every subfolder's own total via
 // `subfolderTotals`, so browsing into a subfolder afterwards is instant.
 std::optional<ULONGLONG> GetFolderSizeOnDisk(
     const std::wstring& root,
     std::vector<std::pair<std::wstring, ULONGLONG>>* subfolderTotals) {
+    // The folder itself follows the same rules as its subfolders. It's
+    // checked here as well as by the caller, because cached values are
+    // refreshed by walking the folder directly.
+    if (auto raw = ReadAllocation(root)) {
+        if (IsFolderLink(raw->attributes, raw->reparseTag)) {
+            return std::nullopt;
+        }
+        if (IsOnlineOnlyFolder(raw->attributes)) {
+            return 0;
+        }
+    }
+
     ULONGLONG clusterSize = GetClusterSize(root);
 
     // ULONGLONG elements keep the buffer 8-byte aligned, as required.
@@ -507,14 +531,9 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(
 
                 if (name != L"."sv && name != L".."sv) {
                     if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-                        // Skip junctions and directory symlinks. Also skip
-                        // cloud folders whose contents aren't on this PC yet:
-                        // they hold 0 bytes locally, and listing them would
-                        // make OneDrive fetch the listing from the internet.
-                        if (IsReparseTagNameSurrogate(reparseTag)) {
+                        if (IsFolderLink(attributes, reparseTag)) {
                             // Not counted, not cached.
-                        } else if (attributes &
-                                   FILE_ATTRIBUTE_RECALL_ON_OPEN) {
+                        } else if (IsOnlineOnlyFolder(attributes)) {
                             // Cached as 0 bytes without listing it.
                             nodes.push_back({JoinPath(dir, name), index, 0});
                         } else {
@@ -750,18 +769,32 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
         return cached->item;
     }
 
-    DWORD attributes = GetFileAttributesW(ToExtendedPath(path).c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return std::nullopt;
+    // Reads the attributes and reparse tag without following links, and gives
+    // a file's size in the same call.
+    auto raw = ReadAllocation(path);
+    if (!raw) {
+        // Still tell files and folders apart, so sorting keeps them grouped.
+        DWORD attributes = GetFileAttributesW(ToExtendedPath(path).c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            return std::nullopt;
+        }
+        return ItemSize{std::nullopt,
+                        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0};
     }
 
     ItemSize item;
-    item.isFolder = attributes & FILE_ATTRIBUTE_DIRECTORY;
+    item.isFolder = raw->attributes & FILE_ATTRIBUTE_DIRECTORY;
 
     if (!item.isFolder) {
-        item.size = GetFileSizeOnDisk(path, GetClusterSize(path));
+        item.size =
+            AdjustAllocationSize(path, raw->attributes, raw->reparseTag,
+                                 raw->allocationSize, GetClusterSize(path));
+    } else if (IsFolderLink(raw->attributes, raw->reparseTag)) {
+        return item;  // Shown empty, as links aren't followed.
     } else if (!ShouldCalculateFolder(path)) {
         return item;  // Not calculated, and not cached either.
+    } else if (IsOnlineOnlyFolder(raw->attributes)) {
+        item.size = 0;  // Not listed, so OneDrive isn't asked for anything.
     } else if (IsGUIThread(FALSE)) {
         // Never walk a folder tree on a thread that owns windows, as that can
         // freeze Explorer. Calculate in the background and show it when done.

@@ -2,7 +2,7 @@
 // @id              explorer-size-on-disk-column
 // @name            Size on disk column in Explorer details
 // @description     Adds a "Size on disk" column to File Explorer's details view for files and folders
-// @version         0.2.0
+// @version         0.3.0
 // @author          stoilms
 // @github          https://github.com/stoilms
 // @include         explorer.exe
@@ -44,8 +44,10 @@ closely as possible.
 
 ## Notes
 
-* Folder calculation can be slow for large trees. Results are cached for a
-  short, configurable time so sorting doesn't recalculate everything.
+* Folder calculation can be slow for large trees, so it never runs on
+  Explorer's window threads. A folder's value appears as soon as its
+  calculation finishes in the background. Results are cached for a short,
+  configurable time so sorting doesn't recalculate everything.
 * Network folders are skipped by default.
 * Only regular file-system folders are supported. Libraries, search results,
   zip folders and the Recycle Bin are not.
@@ -59,12 +61,12 @@ don't have saved view settings, so after enabling it either reset saved views
 (Folder Options > View > **Reset Folders**) or set the column up in one folder
 and use Folder Options > View > **Apply to Folders** for each folder type.
 
-## Diagnostics
+## How it works
 
-With **Diagnostics** enabled, the mod indexes windows.storage.dll symbols in
-the background (the first run downloads the symbol file, which can take a
-minute) and logs call stacks that show how Explorer fetches the column's
-values. Turn it off once the values are correct.
+Windows already defines a hidden System.FileAllocationSize property, and
+Explorer's own getter for it (CFSFolder::_GetFileAllocationSize) just returns
+the logical size. The mod exposes the property as a column and replaces that
+getter with a real size on disk calculation.
 */
 // ==/WindhawkModReadme==
 
@@ -97,11 +99,11 @@ values. Turn it off once the values are correct.
   $description: >-
     Adds the column after Size in Explorer's folder templates. Only affects
     folders without saved view settings - see the mod description.
-- diagnostics: true
+- diagnostics: false
   $name: Diagnostics
   $description: >-
-    Logs extra information to help fix the values shown in the column. Can
-    slow down the first Explorer start while symbols are downloaded.
+    Logs which code paths Explorer uses for the column. Only needed when
+    troubleshooting.
 - cacheSeconds: 10
   $name: Cache duration (seconds)
   $description: >-
@@ -167,6 +169,7 @@ constexpr WCHAR kColumnTitle[] = L"Size on disk";
 constexpr UINT kColumnWidthChars = 12;
 
 std::atomic<int> g_hookRefCount;
+extern std::atomic<bool> g_stopping;
 
 auto HookRefCountScope() {
     g_hookRefCount++;
@@ -355,6 +358,10 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(const std::wstring& root) {
     ULONGLONG total = 0;
 
     while (!pending.empty()) {
+        if (g_stopping) {
+            return std::nullopt;
+        }
+
         std::wstring dir = std::move(pending.back());
         pending.pop_back();
 
@@ -426,6 +433,74 @@ struct CacheEntry {
 std::mutex g_cacheMutex;
 std::unordered_map<std::wstring, CacheEntry> g_cache;
 
+// Background folder calculations.
+std::atomic<bool> g_stopping;
+std::atomic<int> g_pendingJobs;
+std::mutex g_pendingMutex;
+std::unordered_set<std::wstring> g_pendingPaths;
+
+std::optional<ItemSize> LookupCache(const std::wstring& path) {
+    std::lock_guard lock(g_cacheMutex);
+    auto it = g_cache.find(path);
+    if (it == g_cache.end()) {
+        return std::nullopt;
+    }
+    if (GetTickCount64() - it->second.tick >= g_settings.cacheMs) {
+        g_cache.erase(it);
+        return std::nullopt;
+    }
+    return it->second.item;
+}
+
+void StoreCache(const std::wstring& path, const ItemSize& item) {
+    std::lock_guard lock(g_cacheMutex);
+    if (g_cache.size() > 20000) {
+        g_cache.clear();
+    }
+    g_cache[path] = {item, GetTickCount64()};
+}
+
+DWORD WINAPI FolderJob(void* parameter) {
+    std::unique_ptr<std::wstring> path(static_cast<std::wstring*>(parameter));
+
+    if (!g_stopping) {
+        Wh_Log(L"Calculating folder in background: %s", path->c_str());
+        auto size = GetFolderSizeOnDisk(*path);
+        if (size && !g_stopping) {
+            StoreCache(*path, {size, true});
+            // Ask Explorer to re-read this item; the value now comes from the
+            // cache.
+            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                           path->c_str(), nullptr);
+        }
+    }
+
+    {
+        std::lock_guard lock(g_pendingMutex);
+        g_pendingPaths.erase(*path);
+    }
+    g_pendingJobs--;
+    return 0;
+}
+
+void StartFolderJob(const std::wstring& path) {
+    {
+        std::lock_guard lock(g_pendingMutex);
+        if (!g_pendingPaths.insert(path).second) {
+            return;  // Already running.
+        }
+    }
+
+    g_pendingJobs++;
+    auto* parameter = new std::wstring(path);
+    if (!QueueUserWorkItem(FolderJob, parameter, WT_EXECUTELONGFUNCTION)) {
+        delete parameter;
+        std::lock_guard lock(g_pendingMutex);
+        g_pendingPaths.erase(path);
+        g_pendingJobs--;
+    }
+}
+
 bool ShouldCalculateFolder(const std::wstring& path) {
     switch (g_settings.folderSizes) {
         case FolderSizes::disabled:
@@ -443,16 +518,8 @@ bool ShouldCalculateFolder(const std::wstring& path) {
 }
 
 std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
-    ULONGLONG now = GetTickCount64();
-
-    {
-        std::lock_guard lock(g_cacheMutex);
-        if (auto it = g_cache.find(path); it != g_cache.end()) {
-            if (now - it->second.tick < g_settings.cacheMs) {
-                return it->second.item;
-            }
-            g_cache.erase(it);
-        }
+    if (auto cached = LookupCache(path)) {
+        return cached;
     }
 
     DWORD attributes = GetFileAttributesW(ToExtendedPath(path).c_str());
@@ -465,19 +532,19 @@ std::optional<ItemSize> GetItemSizeOnDisk(const std::wstring& path) {
 
     if (!item.isFolder) {
         item.size = GetFileSizeOnDisk(path);
-    } else if (ShouldCalculateFolder(path)) {
-        Wh_Log(L"Calculating folder: %s", path.c_str());
-        item.size = GetFolderSizeOnDisk(path);
-    } else {
+    } else if (!ShouldCalculateFolder(path)) {
         return item;  // Not calculated, and not cached either.
+    } else if (IsGUIThread(FALSE)) {
+        // Never walk a folder tree on a thread that owns windows, as that can
+        // freeze Explorer. Calculate in the background and show it when done.
+        StartFolderJob(path);
+        return item;
+    } else {
+        item.size = GetFolderSizeOnDisk(path);
     }
 
     if (item.size) {
-        std::lock_guard lock(g_cacheMutex);
-        if (g_cache.size() > 20000) {
-            g_cache.clear();
-        }
-        g_cache[path] = {item, GetTickCount64()};
+        StoreCache(path, item);
     }
 
     return item;
@@ -756,51 +823,63 @@ HRESULT WINAPI CFSFolder_CompareIDs_Hook(void* pThis,
     return byName();
 }
 
-// Diagnostics: symbolised call stacks. Declared here, defined further down.
-void LogStackOnce(PCWSTR label);
+// Copy, move and delete operations query sizes too. Leave those alone, as
+// m417z's mod does.
+thread_local bool g_inRecursiveFolderOperation;
 
-// Explorer's own getter behind the Size column. Hooked only to log how it's
-// reached; the value is passed through unchanged.
-using CFSFolder__GetSize_t = HRESULT(WINAPI*)(void* pFolder,
-                                              PCUITEMID_CHILD pidl,
-                                              const void* idFolder,
-                                              PROPVARIANT* value);
-CFSFolder__GetSize_t CFSFolder__GetSize_Original;
-HRESULT WINAPI CFSFolder__GetSize_Hook(void* pFolder,
-                                       PCUITEMID_CHILD pidl,
-                                       const void* idFolder,
-                                       PROPVARIANT* value) {
+using CRecursiveFolderOperation_t = HRESULT(WINAPI*)(void* pThis);
+CRecursiveFolderOperation_t CRecursiveFolderOperation_Prepare_Original;
+HRESULT WINAPI CRecursiveFolderOperation_Prepare_Hook(void* pThis) {
     auto scope = HookRefCountScope();
-    HRESULT hr = CFSFolder__GetSize_Original(pFolder, pidl, idFolder, value);
-    if (g_settings.diagnostics) {
-        LogStackOnce(L"CFSFolder::_GetSize");
-    }
+    bool previous = g_inRecursiveFolderOperation;
+    g_inRecursiveFolderOperation = true;
+    HRESULT hr = CRecursiveFolderOperation_Prepare_Original(pThis);
+    g_inRecursiveFolderOperation = previous;
     return hr;
 }
 
-// If windows.storage.dll has a dedicated getter for the allocation size with
-// the same shape as _GetSize, it's found during symbol enumeration and hooked
-// here so it returns the real size on disk.
-CFSFolder__GetSize_t CFSFolder_AllocGetter_Original;
-HRESULT WINAPI CFSFolder_AllocGetter_Hook(void* pFolder,
-                                          PCUITEMID_CHILD pidl,
-                                          const void* idFolder,
-                                          PROPVARIANT* value) {
+CRecursiveFolderOperation_t CRecursiveFolderOperation_Do_Original;
+HRESULT WINAPI CRecursiveFolderOperation_Do_Hook(void* pThis) {
+    auto scope = HookRefCountScope();
+    bool previous = g_inRecursiveFolderOperation;
+    g_inRecursiveFolderOperation = true;
+    HRESULT hr = CRecursiveFolderOperation_Do_Original(pThis);
+    g_inRecursiveFolderOperation = previous;
+    return hr;
+}
+
+// Explorer's own getter for System.FileAllocationSize, which only returns the
+// logical size. Found via the v0.2 diagnostics.
+using CFSFolder__GetFileAllocationSize_t =
+    HRESULT(WINAPI*)(void* pFolder,
+                     PCUITEMID_CHILD pidl,
+                     const void* idFolder,
+                     PROPVARIANT* value);
+CFSFolder__GetFileAllocationSize_t CFSFolder__GetFileAllocationSize_Original;
+HRESULT WINAPI CFSFolder__GetFileAllocationSize_Hook(void* pFolder,
+                                                     PCUITEMID_CHILD pidl,
+                                                     const void* idFolder,
+                                                     PROPVARIANT* value) {
+    auto original = [=]() {
+        return CFSFolder__GetFileAllocationSize_Original(pFolder, pidl,
+                                                         idFolder, value);
+    };
+
+    if (!pidl || !value || g_inRecursiveFolderOperation || g_stopping) {
+        return original();
+    }
+
     auto scope = HookRefCountScope();
 
     static std::atomic<int> hits;
     if (FirstHits(hits)) {
-        Wh_Log(L"[diag] Allocation size getter called");
-        LogStackOnce(L"allocation size getter");
-    }
-
-    if (!value || !pidl) {
-        return CFSFolder_AllocGetter_Original(pFolder, pidl, idFolder, value);
+        Wh_Log(L"[diag] _GetFileAllocationSize called (GUI thread: %d)",
+               IsGUIThread(FALSE));
     }
 
     auto item = GetItemSizeOnDisk(pFolder, pidl);
     if (!item) {
-        return CFSFolder_AllocGetter_Original(pFolder, pidl, idFolder, value);
+        return original();
     }
 
     PropVariantInit(value);
@@ -836,14 +915,24 @@ bool HookWindowsStorageSymbols() {
             CFSFolder_CompareIDs_Hook,
         },
         {
-            {LR"(protected: static long __cdecl CFSFolder::_GetSize(class CFSFolder *,struct _ITEMID_CHILD const __unaligned *,struct IDFOLDER const __unaligned *,struct tagPROPVARIANT *))"},
-            &CFSFolder__GetSize_Original,
-            CFSFolder__GetSize_Hook,
+            {LR"(protected: static long __cdecl CFSFolder::_GetFileAllocationSize(class CFSFolder *,struct _ITEMID_CHILD const __unaligned *,struct IDFOLDER const __unaligned *,struct tagPROPVARIANT *))"},
+            &CFSFolder__GetFileAllocationSize_Original,
+            CFSFolder__GetFileAllocationSize_Hook,
+        },
+        {
+            {LR"(public: long __cdecl CRecursiveFolderOperation::Prepare(void))"},
+            &CRecursiveFolderOperation_Prepare_Original,
+            CRecursiveFolderOperation_Prepare_Hook,
             true,
         },
-        // The two below are best guesses at the symbol names, so they're
-        // optional. If they don't resolve, the mod still loads and relies on
-        // the property description hooks for the header and column state.
+        {
+            {LR"(public: virtual long __cdecl CRecursiveFolderOperation::Do(void))"},
+            &CRecursiveFolderOperation_Do_Original,
+            CRecursiveFolderOperation_Do_Hook,
+            true,
+        },
+        // Header text and column state for the appended column. Optional so
+        // the mod still loads if a Windows update renames them.
         {
             {LR"(public: virtual long __cdecl CFSFolder::GetDetailsOf(struct _ITEMID_CHILD const __unaligned *,unsigned int,struct _SHELLDETAILS *))"},
             &CFSFolder_GetDetailsOf_Original,
@@ -862,128 +951,11 @@ bool HookWindowsStorageSymbols() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// propsys.dll hooks: give System.FileAllocationSize a label, make it viewable
-// and format it like the Size column.
-//
-// These hook the shared IPropertyDescription implementation via its vtable, so
-// every hook first checks whether `this` is the size on disk description.
-// Vtable slot indices verified against propsys.h.
+// propsys.dll hooks
 
-constexpr int kVtGetDisplayName = 6;
-constexpr int kVtGetTypeFlags = 8;
-constexpr int kVtGetDefaultColumnWidth = 10;
-constexpr int kVtGetDisplayType = 11;
-constexpr int kVtGetColumnState = 12;
-constexpr int kVtGetAggregationType = 18;
-constexpr int kVtFormatForDisplay = 22;
-
-bool IsSizeOnDiskDescription(IPropertyDescription* description) {
-    PROPERTYKEY key;
-    return SUCCEEDED(description->GetPropertyKey(&key)) &&
-           IsEqualPropertyKey(key, kPKEY_SizeOnDisk);
-}
-
-using GetDisplayName_t = HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*,
-                                                     LPWSTR*);
-GetDisplayName_t GetDisplayName_Original;
-HRESULT STDMETHODCALLTYPE GetDisplayName_Hook(IPropertyDescription* pThis,
-                                              LPWSTR* displayName) {
-    if (!displayName || !IsSizeOnDiskDescription(pThis)) {
-        return GetDisplayName_Original(pThis, displayName);
-    }
-    return SHStrDupW(kColumnTitle, displayName);
-}
-
-using GetTypeFlags_t = HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*,
-                                                   PROPDESC_TYPE_FLAGS,
-                                                   PROPDESC_TYPE_FLAGS*);
-GetTypeFlags_t GetTypeFlags_Original;
-HRESULT STDMETHODCALLTYPE GetTypeFlags_Hook(IPropertyDescription* pThis,
-                                            PROPDESC_TYPE_FLAGS mask,
-                                            PROPDESC_TYPE_FLAGS* flags) {
-    HRESULT hr = GetTypeFlags_Original(pThis, mask, flags);
-    if (SUCCEEDED(hr) && flags && IsSizeOnDiskDescription(pThis)) {
-        *flags = (PROPDESC_TYPE_FLAGS)((*flags | PDTF_ISVIEWABLE) & mask);
-    }
-    return hr;
-}
-
-using GetDefaultColumnWidth_t =
-    HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*, UINT*);
-GetDefaultColumnWidth_t GetDefaultColumnWidth_Original;
-HRESULT STDMETHODCALLTYPE
-GetDefaultColumnWidth_Hook(IPropertyDescription* pThis, UINT* width) {
-    if (!width || !IsSizeOnDiskDescription(pThis)) {
-        return GetDefaultColumnWidth_Original(pThis, width);
-    }
-    *width = kColumnWidthChars;
-    return S_OK;
-}
-
-using GetDisplayType_t = HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*,
-                                                     PROPDESC_DISPLAYTYPE*);
-GetDisplayType_t GetDisplayType_Original;
-HRESULT STDMETHODCALLTYPE GetDisplayType_Hook(IPropertyDescription* pThis,
-                                              PROPDESC_DISPLAYTYPE* type) {
-    if (!type || !IsSizeOnDiskDescription(pThis)) {
-        return GetDisplayType_Original(pThis, type);
-    }
-    *type = PDDT_NUMBER;
-    return S_OK;
-}
-
-using GetColumnState_t = HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*,
-                                                     SHCOLSTATEF*);
-GetColumnState_t GetColumnState_Original;
-HRESULT STDMETHODCALLTYPE GetColumnState_Hook(IPropertyDescription* pThis,
-                                              SHCOLSTATEF* flags) {
-    if (!flags || !IsSizeOnDiskDescription(pThis)) {
-        return GetColumnState_Original(pThis, flags);
-    }
-    *flags = SHCOLSTATE_TYPE_INT | SHCOLSTATE_SLOW;
-    return S_OK;
-}
-
-using GetAggregationType_t =
-    HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*, PROPDESC_AGGREGATION_TYPE*);
-GetAggregationType_t GetAggregationType_Original;
-HRESULT STDMETHODCALLTYPE
-GetAggregationType_Hook(IPropertyDescription* pThis,
-                        PROPDESC_AGGREGATION_TYPE* type) {
-    if (!type || !IsSizeOnDiskDescription(pThis)) {
-        return GetAggregationType_Original(pThis, type);
-    }
-    *type = PDAT_SUM;
-    return S_OK;
-}
-
-using FormatForDisplay_t = HRESULT(STDMETHODCALLTYPE*)(IPropertyDescription*,
-                                                       const PROPVARIANT&,
-                                                       PROPDESC_FORMAT_FLAGS,
-                                                       LPWSTR*);
-FormatForDisplay_t FormatForDisplay_Original;
-HRESULT STDMETHODCALLTYPE FormatForDisplay_Hook(IPropertyDescription* pThis,
-                                                const PROPVARIANT& value,
-                                                PROPDESC_FORMAT_FLAGS flags,
-                                                LPWSTR* display) {
-    if (!IsSizeOnDiskDescription(pThis)) {
-        return FormatForDisplay_Original(pThis, value, flags, display);
-    }
-
-    // Format exactly like the Size column. The property system caches
-    // descriptions, so fetching it each time is cheap.
-    ComPtr<IPropertyDescription> sizeDescription;
-    if (FAILED(PSGetPropertyDescription(kPKEY_Size,
-                                        IID_IPropertyDescription,
-                                        sizeDescription.PutVoid()))) {
-        return FormatForDisplay_Original(pThis, value, flags, display);
-    }
-    return FormatForDisplay_Original(sizeDescription.Get(), value, flags,
-                                     display);
-}
-
-// Explorer formats column text through these exports too, which may not go
-// through the vtable. Swap our key for Size so the text is formatted the same.
+// System.FileAllocationSize has no display format of its own. Explorer formats
+// column text through these exports, so swap in the Size key to get identical
+// formatting.
 using PSFormatForDisplayAlloc_t = decltype(&PSFormatForDisplayAlloc);
 PSFormatForDisplayAlloc_t PSFormatForDisplayAlloc_Original;
 HRESULT WINAPI PSFormatForDisplayAlloc_Hook(const PROPERTYKEY& key,
@@ -1012,57 +984,6 @@ HRESULT WINAPI PSFormatForDisplay_Hook(const PROPERTYKEY& key,
     return PSFormatForDisplay_Original(
         IsEqualPropertyKey(key, kPKEY_SizeOnDisk) ? kPKEY_Size : key, value,
         flags, text, textLength);
-}
-
-bool HookPropertyDescription() {
-    // Wh_ModInit runs on a thread without COM, and the property system needs
-    // it (the first version failed here with CO_E_NOTINITIALIZED).
-    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    IPropertyDescription* description = nullptr;
-    HRESULT hr = PSGetPropertyDescription(kPKEY_SizeOnDisk,
-                                          IID_PPV_ARGS(&description));
-
-    if (FAILED(hr) || !description) {
-        Wh_Log(L"PSGetPropertyDescription failed: %08X", hr);
-        if (SUCCEEDED(hrCom)) {
-            CoUninitialize();
-        }
-        return false;
-    }
-
-    void** vtable = *reinterpret_cast<void***>(description);
-
-    auto hook = [vtable](int index, void* hookFunction, void** original) {
-        if (!Wh_SetFunctionHook(vtable[index], hookFunction, original)) {
-            Wh_Log(L"Failed to hook vtable slot %d", index);
-        }
-    };
-
-    hook(kVtGetDisplayName, (void*)GetDisplayName_Hook,
-         (void**)&GetDisplayName_Original);
-    hook(kVtGetTypeFlags, (void*)GetTypeFlags_Hook,
-         (void**)&GetTypeFlags_Original);
-    hook(kVtGetDefaultColumnWidth, (void*)GetDefaultColumnWidth_Hook,
-         (void**)&GetDefaultColumnWidth_Original);
-    hook(kVtGetDisplayType, (void*)GetDisplayType_Hook,
-         (void**)&GetDisplayType_Original);
-    hook(kVtGetColumnState, (void*)GetColumnState_Hook,
-         (void**)&GetColumnState_Original);
-    hook(kVtGetAggregationType, (void*)GetAggregationType_Hook,
-         (void**)&GetAggregationType_Original);
-    hook(kVtFormatForDisplay, (void*)FormatForDisplay_Hook,
-         (void**)&FormatForDisplay_Original);
-
-    // The vtable lives in propsys.dll's code, so it stays valid after the
-    // object is released.
-    description->Release();
-    if (SUCCEEDED(hrCom)) {
-        CoUninitialize();
-    }
-
-    Wh_Log(L"Property description hooks set");
-    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1271,179 +1192,6 @@ void HookRegistryFunctions() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Diagnostics: index windows.storage.dll symbols in the background, log
-// symbolised call stacks, and hook a dedicated allocation size getter if one
-// exists.
-
-struct SymbolEntry {
-    ULONG_PTR address;
-    std::wstring name;
-};
-
-HMODULE g_windowsStorage;
-std::vector<SymbolEntry> g_symbols;  // Sorted by address once ready.
-std::atomic<bool> g_symbolsReady;
-std::atomic<bool> g_stopBackground;
-HANDLE g_backgroundThread;
-
-std::wstring DescribeAddress(void* address) {
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (PCWSTR)address, &module)) {
-        WCHAR text[32];
-        swprintf(text, ARRAYSIZE(text), L"%p", address);
-        return text;
-    }
-
-    WCHAR path[MAX_PATH];
-    DWORD length = GetModuleFileNameW(module, path, ARRAYSIZE(path));
-    PCWSTR moduleName = L"?";
-    if (length) {
-        PCWSTR slash = wcsrchr(path, L'\\');
-        moduleName = slash ? slash + 1 : path;
-    }
-
-    WCHAR text[MAX_PATH + 32];
-    swprintf(text, ARRAYSIZE(text), L"%s+0x%llX", moduleName,
-             (unsigned long long)((ULONG_PTR)address - (ULONG_PTR)module));
-    std::wstring result = text;
-
-    if (module == g_windowsStorage && g_symbolsReady) {
-        auto it = std::upper_bound(
-            g_symbols.begin(), g_symbols.end(), (ULONG_PTR)address,
-            [](ULONG_PTR value, const SymbolEntry& entry) {
-                return value < entry.address;
-            });
-        if (it != g_symbols.begin()) {
-            --it;
-            swprintf(text, ARRAYSIZE(text), L"+0x%llX",
-                     (unsigned long long)((ULONG_PTR)address - it->address));
-            result += L"  ";
-            result += it->name;
-            result += text;
-        }
-    }
-
-    return result;
-}
-
-void LogStackOnce(PCWSTR label) {
-    // Wait until frames can be named, so the useful stacks aren't used up.
-    if (!g_symbolsReady) {
-        return;
-    }
-
-    void* frames[24];
-    ULONG hash = 0;
-    USHORT count = RtlCaptureStackBackTrace(1, ARRAYSIZE(frames), frames, &hash);
-
-    static std::mutex mutex;
-    static std::unordered_set<ULONG> seen;
-    std::lock_guard lock(mutex);
-    if (seen.size() >= 12 || !seen.insert(hash).second) {
-        return;
-    }
-
-    Wh_Log(L"[stack %u] %s", (unsigned)seen.size(), label);
-    for (USHORT i = 0; i < count; i++) {
-        Wh_Log(L"  #%02u %s", i, DescribeAddress(frames[i]).c_str());
-    }
-}
-
-bool IsInterestingSymbol(std::wstring_view name) {
-    if (!ContainsCaseInsensitive(name, L"CFSFolder"sv) &&
-        !ContainsCaseInsensitive(name, L"PropertyStore"sv)) {
-        return false;
-    }
-    return ContainsCaseInsensitive(name, L"Alloc"sv) ||
-           ContainsCaseInsensitive(name, L"Size"sv) ||
-           ContainsCaseInsensitive(name, L"GetDetails"sv) ||
-           ContainsCaseInsensitive(name, L"GetValue"sv) ||
-           ContainsCaseInsensitive(name, L"Innate"sv) ||
-           ContainsCaseInsensitive(name, L"PropertyKey"sv);
-}
-
-bool IsAllocGetterCandidate(std::wstring_view name) {
-    return ContainsCaseInsensitive(name, L"CFSFolder::"sv) &&
-           ContainsCaseInsensitive(name, L"Alloc"sv) &&
-           name.find(
-               L"(class CFSFolder *,struct _ITEMID_CHILD const __unaligned *,"
-               L"struct IDFOLDER const __unaligned *,struct tagPROPVARIANT *)"sv) !=
-               std::wstring_view::npos;
-}
-
-DWORD WINAPI BackgroundThread(void*) {
-    Wh_Log(L"[diag] Indexing windows.storage.dll symbols...");
-
-    WH_FIND_SYMBOL_OPTIONS options{};
-    options.optionsSize = sizeof(options);
-
-    WH_FIND_SYMBOL symbol;
-    HANDLE search = Wh_FindFirstSymbol(g_windowsStorage, &options, &symbol);
-    if (!search) {
-        Wh_Log(L"[diag] Symbol enumeration failed");
-        return 0;
-    }
-
-    std::vector<SymbolEntry> symbols;
-    void* allocGetter = nullptr;
-    int interesting = 0;
-
-    do {
-        if (g_stopBackground) {
-            Wh_FindCloseSymbol(search);
-            return 0;
-        }
-        if (!symbol.symbol || !wcschr(symbol.symbol, L'(')) {
-            continue;  // Keep functions only.
-        }
-
-        std::wstring_view name = symbol.symbol;
-        symbols.push_back({(ULONG_PTR)symbol.address, std::wstring(name)});
-
-        if (IsInterestingSymbol(name) && interesting++ < 200) {
-            Wh_Log(L"[sym] +0x%llX %s",
-                   (unsigned long long)((ULONG_PTR)symbol.address -
-                                        (ULONG_PTR)g_windowsStorage),
-                   symbol.symbol);
-        }
-
-        if (!allocGetter && IsAllocGetterCandidate(name)) {
-            allocGetter = symbol.address;
-            Wh_Log(L"[diag] Allocation size getter candidate: %s",
-                   symbol.symbol);
-        }
-    } while (Wh_FindNextSymbol(search, &symbol));
-    Wh_FindCloseSymbol(search);
-
-    std::sort(symbols.begin(), symbols.end(),
-              [](const SymbolEntry& a, const SymbolEntry& b) {
-                  return a.address < b.address;
-              });
-    g_symbols = std::move(symbols);
-    g_symbolsReady = true;
-
-    Wh_Log(L"[diag] Symbol index ready (%u functions). Refresh the folder "
-           L"(F5) now.",
-           (unsigned)g_symbols.size());
-
-    if (allocGetter && !g_stopBackground) {
-        if (Wh_SetFunctionHook(allocGetter, (void*)CFSFolder_AllocGetter_Hook,
-                               (void**)&CFSFolder_AllocGetter_Original) &&
-            Wh_ApplyHookOperations()) {
-            Wh_Log(L"[diag] Allocation size getter hooked");
-        } else {
-            Wh_Log(L"[diag] Failed to hook allocation size getter");
-        }
-    } else if (!allocGetter) {
-        Wh_Log(L"[diag] No dedicated allocation size getter found");
-    }
-
-    return 0;
-}
-
-////////////////////////////////////////////////////////////////////////////////
 // Mod lifecycle
 
 void LoadSettings() {
@@ -1483,10 +1231,6 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
-    if (!HookPropertyDescription()) {
-        Wh_Log(L"Property description hooks unavailable; continuing");
-    }
-
     WindhawkUtils::Wh_SetFunctionHookT(PSFormatForDisplayAlloc,
                                        PSFormatForDisplayAlloc_Hook,
                                        &PSFormatForDisplayAlloc_Original);
@@ -1498,33 +1242,22 @@ BOOL Wh_ModInit() {
         HookRegistryFunctions();
     }
 
-    if (g_settings.diagnostics) {
-        g_windowsStorage = GetModuleHandleW(L"windows.storage.dll");
-        if (g_windowsStorage) {
-            g_backgroundThread =
-                CreateThread(nullptr, 0, BackgroundThread, nullptr, 0, nullptr);
-        }
-    }
-
     return TRUE;
 }
 
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
 
-    g_stopBackground = true;
-    if (g_backgroundThread) {
-        WaitForSingleObject(g_backgroundThread, INFINITE);
-        CloseHandle(g_backgroundThread);
-        g_backgroundThread = nullptr;
-    }
+    // Stops folder walks at the next directory.
+    g_stopping = true;
 }
 
 void Wh_ModUninit() {
     Wh_Log(L">");
 
-    while (g_hookRefCount > 0) {
-        Sleep(200);
+    g_stopping = true;
+    while (g_hookRefCount > 0 || g_pendingJobs > 0) {
+        Sleep(100);
     }
 }
 

@@ -486,13 +486,16 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(
             continue;  // Access denied etc. - skip, as Properties does.
         }
 
+        // Also check the stop flag for every file, so a folder with many files
+        // doesn't delay unloading.
         FILE_INFO_BY_HANDLE_CLASS infoClass = FileFullDirectoryRestartInfo;
-        while (GetFileInformationByHandleEx(handle, infoClass, buffer.data(),
+        while (!g_stopping &&
+               GetFileInformationByHandleEx(handle, infoClass, buffer.data(),
                                             bufferBytes)) {
             infoClass = FileFullDirectoryInfo;
 
             auto* entry = reinterpret_cast<FILE_FULL_DIR_INFO*>(buffer.data());
-            while (true) {
+            while (!g_stopping) {
                 std::wstring_view name(entry->FileName,
                                        entry->FileNameLength / sizeof(WCHAR));
                 DWORD attributes = entry->FileAttributes;
@@ -541,6 +544,11 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(
         }
 
         CloseHandle(handle);
+    }
+
+    // A walk stopped part-way through has only a partial total.
+    if (g_stopping) {
+        return std::nullopt;
     }
 
     // Children always come after their parent, so summing from the end rolls

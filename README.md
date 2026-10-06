@@ -37,6 +37,7 @@ With **Add to default folder layouts** enabled, the column is added to Explorer'
 | Mix files and folders when sorting | Off | By default, folders stay together when sorting by size on disk. |
 | Add to default folder layouts | On | Adds the column after Size in Explorer's folder templates. |
 | Folder refresh interval (seconds) | 120 | Cached values are shown straight away; older folder values are recalculated in the background. |
+| Remember subfolder sizes | All subfolders | Calculating a folder also finds every subfolder's size. Remembering all of them makes browsing deeper instant but uses more memory in Explorer (up to about 30 MB); with direct subfolders only, deeper folders are calculated again when opened. |
 
 ## How it works
 
@@ -44,7 +45,7 @@ Windows already defines a hidden `System.FileAllocationSize` property, but Explo
 
 - **Files:** the allocation size rounded down to whole clusters, so tiny files stored inside the NTFS file table count as 0 bytes, as in Properties. Compressed, sparse and CompactOS files use their compressed size rounded up to whole clusters.
 - **Folders:** the sum of every file underneath, calculated in the background at low priority and never on Explorer's window threads. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
-- **Cache:** folder values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches all of its subfolders. File values are only reused for a few seconds, so a changed file shows its new size after a refresh.
+- **Cache:** folder values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches its subfolders (all, or only the direct ones, depending on a setting). When the cache is full, old values make room and new subfolder values are skipped; values in use are never dropped. File values are only reused for a few seconds, so a changed file shows its new size after a refresh.
 
 ## Limitations
 

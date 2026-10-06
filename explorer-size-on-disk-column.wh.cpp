@@ -57,7 +57,8 @@ The values match the Properties dialog:
 * Folder calculation can be slow for large trees, so it never runs on
   Explorer's window threads. A folder's value appears as soon as its
   calculation finishes in the background, at low priority. Calculating a
-  folder also caches all of its subfolders, so browsing into them is instant.
+  folder also caches its subfolders (all of them, or only the direct ones -
+  see **Remember subfolder sizes**), so browsing into them is instant.
   Cached values are shown immediately and refreshed in the background.
 * Cloud folders whose contents aren't on this PC yet are counted as 0 bytes
   without being listed, so OneDrive isn't asked to fetch anything.
@@ -128,6 +129,16 @@ getter with a real size on disk calculation.
   $description: >-
     A folder's value is shown from the cache straight away. If it's older than
     this, it's also recalculated in the background and updated if it changed.
+- subfolderCache: all
+  $name: Remember subfolder sizes
+  $description: >-
+    Calculating a folder also finds the size of every folder inside it.
+    Remembering all of them makes browsing deeper instant, but uses more
+    memory in Explorer (up to about 30 MB). With direct subfolders only,
+    deeper folders are calculated again when you open them.
+  $options:
+  - all: All subfolders
+  - directOnly: Direct subfolders only
 */
 // ==/WindhawkModSettings==
 
@@ -175,6 +186,7 @@ struct {
     bool mixFoldersWhenSorting;
     bool addToDefaultColumns;
     ULONGLONG cacheMs;
+    bool cacheAllSubfolders;
 } g_settings;
 
 constexpr GUID kFmtStorage = {0xB725F130,
@@ -416,8 +428,9 @@ bool IsOnlineOnlyFolder(DWORD attributes) {
     return attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN;
 }
 
-// Walks a folder tree. Returns the total, and every subfolder's own total via
-// `subfolderTotals`, so browsing into a subfolder afterwards is instant.
+// Walks a folder tree. Returns the total, and the subfolders' own totals via
+// `subfolderTotals` (all of them, or only the direct subfolders, depending on
+// the setting), so browsing into a subfolder afterwards is instant.
 std::optional<ULONGLONG> GetFolderSizeOnDisk(
     const std::wstring& root,
     std::vector<std::pair<std::wstring, ULONGLONG>>* subfolderTotals) {
@@ -534,9 +547,13 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(
         nodes[nodes[i].parent].total += nodes[i].total;
     }
 
+    // The root's direct subfolders always come first, as the root is listed
+    // before any of them.
     if (subfolderTotals) {
-        subfolderTotals->reserve(nodes.size() - 1);
         for (size_t i = 1; i < nodes.size(); i++) {
+            if (!g_settings.cacheAllSubfolders && nodes[i].parent != 0) {
+                break;
+            }
             subfolderTotals->emplace_back(std::move(nodes[i].path),
                                           nodes[i].total);
         }
@@ -594,18 +611,29 @@ std::optional<CacheLookup> LookupCache(const std::wstring& path) {
     return CacheLookup{it->second.item, fresh};
 }
 
-// Caller holds g_cacheMutex.
+// Caller holds g_cacheMutex. Makes room by dropping values that are no longer
+// fresh. Fresh values are never dropped, so values shown in other windows
+// aren't lost; while the cache is full of them, new subfolder values just
+// aren't added (see StoreSubfolderTotals).
 void TrimCacheLocked() {
     if (g_cache.size() <= kMaxCacheEntries) {
         return;
     }
+
+    // Each pass looks at every entry, so don't repeat it on every store while
+    // the cache stays full.
+    static ULONGLONG lastTrim;
     ULONGLONG now = GetTickCount64();
-    std::erase_if(g_cache, [now](const auto& entry) {
-        return now - entry.second.tick >= g_settings.cacheMs;
-    });
-    if (g_cache.size() > kMaxCacheEntries) {
-        g_cache.clear();
+    if (lastTrim && now - lastTrim < 1000) {
+        return;
     }
+    lastTrim = now;
+
+    std::erase_if(g_cache, [now](const auto& entry) {
+        ULONGLONG maxAge =
+            entry.second.item.isFolder ? g_settings.cacheMs : kFileCacheMs;
+        return now - entry.second.tick >= maxAge;
+    });
 }
 
 void StoreCache(const std::wstring& path, const ItemSize& item) {
@@ -614,14 +642,28 @@ void StoreCache(const std::wstring& path, const ItemSize& item) {
     TrimCacheLocked();
 }
 
+// Stores a walk's subfolder totals in batches, so Explorer's window threads
+// aren't kept waiting for the lock while a very large walk is stored. Once
+// the cache is full, values for folders not cached yet are skipped. The
+// direct subfolders come first, so they're the ones kept.
 void StoreSubfolderTotals(
     const std::vector<std::pair<std::wstring, ULONGLONG>>& totals) {
+    constexpr size_t kBatchSize = 1000;
     ULONGLONG now = GetTickCount64();
-    std::lock_guard lock(g_cacheMutex);
-    for (const auto& [path, total] : totals) {
-        g_cache[path] = {ItemSize{total, true}, now};
+    for (size_t start = 0; start < totals.size(); start += kBatchSize) {
+        std::lock_guard lock(g_cacheMutex);
+        TrimCacheLocked();
+        size_t end = std::min(start + kBatchSize, totals.size());
+        for (size_t i = start; i < end; i++) {
+            const auto& [path, total] = totals[i];
+            CacheEntry entry{ItemSize{total, true}, now};
+            if (auto it = g_cache.find(path); it != g_cache.end()) {
+                it->second = entry;
+            } else if (g_cache.size() < kMaxCacheEntries) {
+                g_cache.emplace(path, entry);
+            }
+        }
     }
-    TrimCacheLocked();
 }
 
 // At most this many folder walks run at once, at background I/O priority, so
@@ -1550,6 +1592,9 @@ void LoadSettings() {
         refreshSeconds = 0;
     }
     g_settings.cacheMs = (ULONGLONG)refreshSeconds * 1000;
+
+    auto subfolderCache = WindhawkUtils::StringSetting::make(L"subfolderCache");
+    g_settings.cacheAllSubfolders = wcscmp(subfolderCache, L"directOnly") != 0;
 }
 
 BOOL Wh_ModInit() {

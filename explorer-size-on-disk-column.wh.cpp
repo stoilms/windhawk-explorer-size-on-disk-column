@@ -568,6 +568,11 @@ struct CacheLookup {
 
 constexpr size_t kMaxCacheEntries = 100000;
 
+// File values are cheap to read again, so they're only reused for a few
+// seconds: long enough for sorting, which asks for every item many times,
+// but short enough that a changed file shows its new size after a refresh.
+constexpr ULONGLONG kFileCacheMs = 5000;
+
 std::mutex g_cacheMutex;
 std::unordered_map<std::wstring, CacheEntry> g_cache;
 
@@ -582,7 +587,9 @@ std::optional<CacheLookup> LookupCache(const std::wstring& path) {
     if (it == g_cache.end()) {
         return std::nullopt;
     }
-    bool fresh = GetTickCount64() - it->second.tick < g_settings.cacheMs;
+    ULONGLONG maxAge =
+        it->second.item.isFolder ? g_settings.cacheMs : kFileCacheMs;
+    bool fresh = GetTickCount64() - it->second.tick < maxAge;
     return CacheLookup{it->second.item, fresh};
 }
 

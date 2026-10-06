@@ -44,7 +44,7 @@ Windows already defines a hidden `System.FileAllocationSize` property, but Explo
 
 - **Files:** the allocation size rounded down to whole clusters, so tiny files stored inside the NTFS file table count as 0 bytes, as in Properties. Compressed, sparse and CompactOS files use their compressed size rounded up to whole clusters.
 - **Folders:** the sum of every file underneath, calculated in the background at low priority and never on Explorer's window threads. Junctions and symbolic links aren't followed. OneDrive and other cloud folders are walked, except those whose contents aren't on the PC yet, which count as 0 bytes without being listed.
-- **Cache:** values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches all of its subfolders.
+- **Cache:** folder values are shown immediately from the cache and refreshed in the background. Calculating a folder also caches all of its subfolders. File values are only reused for a few seconds, so a changed file shows its new size after a refresh.
 
 ## Limitations
 

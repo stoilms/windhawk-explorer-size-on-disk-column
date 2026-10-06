@@ -2,7 +2,7 @@
 // @id              explorer-size-on-disk-column
 // @name            Size on disk column in Explorer details
 // @description     Adds a "Size on disk" column to File Explorer's details view for files and folders
-// @version         0.3.0
+// @version         0.4.0
 // @author          stoilms
 // @github          https://github.com/stoilms
 // @include         explorer.exe
@@ -40,7 +40,9 @@ closely as possible.
   never downloaded.
 * **Folders:** the sum of the size on disk of every file underneath,
   calculated manually by walking the folder tree. Junctions and symbolic links
-  inside the folder are not followed.
+  inside the folder are not followed, but OneDrive and other cloud folders
+  are. As with the Properties dialog, walking an online-only cloud folder may
+  make the sync client fetch its file listing (not the files themselves).
 
 ## Notes
 
@@ -56,7 +58,8 @@ closely as possible.
 ## Showing the column in every folder
 
 With **Add to default folder layouts** enabled, the column is added to
-Explorer's built-in folder templates. Templates only apply to folders that
+Explorer's built-in templates for file folders (never to Home, which breaks
+if its layout is changed). Templates only apply to folders that
 don't have saved view settings, so after enabling it either reset saved views
 (Folder Options > View > **Reset Folders**) or set the column up in one folder
 and use Folder Options > View > **Apply to Folders** for each folder type.
@@ -82,14 +85,15 @@ getter with a real size on disk calculation.
   - always: Enabled, calculated manually (can be slow)
   - withShiftKey: Enabled, calculated manually while holding the Shift key
   - disabled: Disabled (files only)
-- folderAccuracy: fast
+- folderMethod: accurate
   $name: Folder calculation method
   $description: >-
-    Fast reads sizes from directory listings. Accurate opens every file, which
-    avoids rare stale values from NTFS directory entries but is much slower.
+    Accurate asks the file system about every file, matching the Properties
+    dialog. Fast reads sizes from directory listings, which is quicker but can
+    be off for very small files and cloud files.
   $options:
+  - accurate: Accurate (matches Properties)
   - fast: Fast (directory listings)
-  - accurate: Accurate (open each file)
 - networkFolders: false
   $name: Calculate folder sizes on network drives
 - mixFoldersWhenSorting: false
@@ -132,6 +136,12 @@ getter with a real size on disk calculation.
 #include <shobjidl.h>
 #include <shtypes.h>
 
+#ifndef IO_REPARSE_TAG_WOF
+#define IO_REPARSE_TAG_WOF 0x80000017L
+#endif
+#ifndef IsReparseTagNameSurrogate
+#define IsReparseTagNameSurrogate(tag) (((tag)&0x20000000))
+#endif
 #ifndef FILE_ATTRIBUTE_RECALL_ON_OPEN
 #define FILE_ATTRIBUTE_RECALL_ON_OPEN 0x00040000
 #endif
@@ -291,23 +301,19 @@ ULONGLONG RoundUp(ULONGLONG value, ULONGLONG granularity) {
     return (value + granularity - 1) / granularity * granularity;
 }
 
-bool IsCloudPlaceholder(DWORD attributes) {
-    return attributes &
-           (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS |
-            FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE);
-}
-
 // For compressed, sparse and WOF (CompactOS) files the allocation size of the
 // main stream doesn't reflect what's really on disk, so ask for the compressed
-// size instead.
+// size instead. Other reparse points (OneDrive files, symlinks) use the
+// allocation size as reported.
 ULONGLONG AdjustAllocationSize(const std::wstring& path,
                                DWORD attributes,
+                               DWORD reparseTag,
                                ULONGLONG allocationSize) {
     bool needsCompressedSize =
         (attributes &
          (FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_SPARSE_FILE)) ||
         ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-         !IsCloudPlaceholder(attributes));
+         reparseTag == IO_REPARSE_TAG_WOF);
     if (!needsCompressedSize) {
         return allocationSize;
     }
@@ -334,10 +340,10 @@ std::optional<ULONGLONG> GetFileSizeOnDisk(const std::wstring& path) {
         return std::nullopt;
     }
 
-    FILE_BASIC_INFO basic{};
+    FILE_ATTRIBUTE_TAG_INFO tagInfo{};
     FILE_STANDARD_INFO standard{};
-    bool ok = GetFileInformationByHandleEx(file, FileBasicInfo, &basic,
-                                           sizeof(basic)) &&
+    bool ok = GetFileInformationByHandleEx(file, FileAttributeTagInfo,
+                                           &tagInfo, sizeof(tagInfo)) &&
               GetFileInformationByHandleEx(file, FileStandardInfo, &standard,
                                            sizeof(standard));
     CloseHandle(file);
@@ -345,7 +351,8 @@ std::optional<ULONGLONG> GetFileSizeOnDisk(const std::wstring& path) {
         return std::nullopt;
     }
 
-    return AdjustAllocationSize(path, basic.FileAttributes,
+    return AdjustAllocationSize(path, tagInfo.FileAttributes,
+                                tagInfo.ReparseTag,
                                 standard.AllocationSize.QuadPart);
 }
 
@@ -387,10 +394,18 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(const std::wstring& root) {
                                        entry->FileNameLength / sizeof(WCHAR));
                 DWORD attributes = entry->FileAttributes;
 
+                // For reparse points, EaSize holds the reparse tag.
+                DWORD reparseTag = (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                                       ? entry->EaSize
+                                       : 0;
+
                 if (name != L"."sv && name != L".."sv) {
                     if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-                        // Don't follow junctions or directory symlinks.
-                        if (!(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                        // Don't follow junctions or directory symlinks, but do
+                        // descend into cloud folders (OneDrive marks its
+                        // folders as reparse points too - v0.3 skipped them,
+                        // which is why deep OneDrive trees showed 0 bytes).
+                        if (!IsReparseTagNameSurrogate(reparseTag)) {
                             pending.push_back(JoinPath(dir, name));
                         }
                     } else if (g_settings.accurateFolders) {
@@ -398,7 +413,7 @@ std::optional<ULONGLONG> GetFolderSizeOnDisk(const std::wstring& root) {
                                      .value_or(0);
                     } else {
                         total += AdjustAllocationSize(
-                            JoinPath(dir, name), attributes,
+                            JoinPath(dir, name), attributes, reparseTag,
                             entry->AllocationSize.QuadPart);
                     }
                 }
@@ -460,10 +475,23 @@ void StoreCache(const std::wstring& path, const ItemSize& item) {
     g_cache[path] = {item, GetTickCount64()};
 }
 
+// At most this many folder walks run at once, so opening a folder with many
+// subfolders doesn't hammer the disk (or the cloud sync client).
+constexpr LONG kMaxConcurrentWalks = 3;
+HANDLE g_walkSemaphore;
+
 DWORD WINAPI FolderJob(void* parameter) {
     std::unique_ptr<std::wstring> path(static_cast<std::wstring*>(parameter));
 
-    if (!g_stopping) {
+    bool acquired = false;
+    while (!g_stopping && g_walkSemaphore) {
+        if (WaitForSingleObject(g_walkSemaphore, 200) == WAIT_OBJECT_0) {
+            acquired = true;
+            break;
+        }
+    }
+
+    if (acquired && !g_stopping) {
         Wh_Log(L"Calculating folder in background: %s", path->c_str());
         auto size = GetFolderSizeOnDisk(*path);
         if (size && !g_stopping) {
@@ -473,6 +501,10 @@ DWORD WINAPI FolderJob(void* parameter) {
             SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
                            path->c_str(), nullptr);
         }
+    }
+
+    if (acquired) {
+        ReleaseSemaphore(g_walkSemaphore, 1, nullptr);
     }
 
     {
@@ -1066,6 +1098,15 @@ std::optional<std::wstring> InjectSizeOnDiskColumn(std::wstring_view value) {
         return std::nullopt;
     }
 
+    // Leave the Home page's layout alone. Adding a column to it stopped
+    // Explorer windows from opening at all (v0.2 and v0.3).
+    for (auto marker : {L"System.Home."sv, L"System.ActivityInfo"sv,
+                        L"System.WebAccountID"sv}) {
+        if (ContainsCaseInsensitive(value, marker)) {
+            return std::nullopt;
+        }
+    }
+
     std::wstring result(value);
     size_t start = 5;
     while (start <= result.size()) {
@@ -1204,9 +1245,9 @@ void LoadSettings() {
     }
     Wh_FreeStringSetting(folderSizes);
 
-    PCWSTR accuracy = Wh_GetStringSetting(L"folderAccuracy");
-    g_settings.accurateFolders = wcscmp(accuracy, L"accurate") == 0;
-    Wh_FreeStringSetting(accuracy);
+    PCWSTR method = Wh_GetStringSetting(L"folderMethod");
+    g_settings.accurateFolders = wcscmp(method, L"fast") != 0;
+    Wh_FreeStringSetting(method);
 
     g_settings.networkFolders = Wh_GetIntSetting(L"networkFolders");
     g_settings.mixFoldersWhenSorting =
@@ -1242,6 +1283,10 @@ BOOL Wh_ModInit() {
         HookRegistryFunctions();
     }
 
+    g_walkSemaphore =
+        CreateSemaphoreW(nullptr, kMaxConcurrentWalks, kMaxConcurrentWalks,
+                         nullptr);
+
     return TRUE;
 }
 
@@ -1258,6 +1303,11 @@ void Wh_ModUninit() {
     g_stopping = true;
     while (g_hookRefCount > 0 || g_pendingJobs > 0) {
         Sleep(100);
+    }
+
+    if (g_walkSemaphore) {
+        CloseHandle(g_walkSemaphore);
+        g_walkSemaphore = nullptr;
     }
 }
 

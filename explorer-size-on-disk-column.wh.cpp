@@ -5,6 +5,7 @@
 // @version         0.5.0
 // @author          stoilms
 // @github          https://github.com/stoilms
+// @license         GPL-3.0
 // @include         explorer.exe
 // @architecture    x86-64
 // @compilerOptions -lole32 -loleaut32 -lpropsys -lshlwapi -luuid
